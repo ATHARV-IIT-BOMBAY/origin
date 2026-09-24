@@ -1,6 +1,6 @@
 // gestures.test.js — the one runnable check for the gesture math.  Run: node gestures.test.js
 import assert from 'node:assert';
-import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread } from './gestures.js';
+import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread, landmarkToWorld } from './gestures.js';
 
 // Build a synthetic 21-landmark hand: wrist at (0.5,0.9), middle knuckle at (0.5,0.6)
 // => palmSize = 0.3. Thumb/index tips are passed in so we can force open vs pinched.
@@ -30,5 +30,12 @@ assert.ok(Math.abs(handCenter(open).x - 0.5) < 0.05, 'palm center x should sit n
 const near = twoHandSpread(open, shiftX(open, 0.2));
 const far  = twoHandSpread(open, shiftX(open, 0.5));
 assert.ok(far > near, `spread must grow as hands separate (${near} -> ${far})`);
+
+// landmarkToWorld: image center maps to scene origin (at the fixed hand plane), and X is
+// mirrored so a landmark on the image's right lands on the scene's left.
+const mid = landmarkToWorld({ x: 0.5, y: 0.5, z: 0 }, 4, 1.5);
+assert.ok(Math.abs(mid.x) < 1e-9 && Math.abs(mid.y) < 1e-9, 'image center -> world origin (x,y)');
+assert.ok(landmarkToWorld({ x: 0.9, y: 0.5, z: 0 }, 4).x < 0, 'X is mirrored');
+assert.ok(landmarkToWorld({ x: 0.5, y: 0.9, z: 0 }, 4).y < 0, 'image bottom -> lower Y');
 
 console.log('gestures.test.js: all assertions passed ✓');

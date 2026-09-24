@@ -5,9 +5,13 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { HandLandmarker, FilesetResolver, DrawingUtils }
   from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18';
-import { handCenter, isPinching, pinchStrength, twoHandSpread } from './gestures.js';
+import { handCenter, isPinching, pinchStrength, twoHandSpread, landmarkToWorld } from './gestures.js';
 
 // ---- Tuning knobs. A webcam is a messy sensor; these are the calibration dials. ----
 const ROT_SPEED = 6.0;    // how far a hand move rotates the model
@@ -16,6 +20,9 @@ const SMOOTH = 0.20;      // 0..1 low-pass ease; lower = smoother but laggier
 const MIRROR_X = -1;      // flip so moving your hand right rotates the model right
 const PINCH_ON = 0.6;     // pinch strength (0..1) needed to start rotating
 const SCALE_MIN = 0.3, SCALE_MAX = 4.0;
+const HAND_SPAN = 4.2;    // how wide the tracked hand maps into the 3D scene
+const HAND_DEPTH = 1.5;   // how strongly landmark depth pushes hand joints in/out
+const IDLE_SPIN = 0.0015; // lazy auto-rotate (rad/frame) when you're not controlling it
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm';
 
@@ -36,13 +43,34 @@ scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture; // sof
 scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 0.6));
 const key = new THREE.DirectionalLight(0xffffff, 2.0); key.position.set(3, 4, 5); scene.add(key);
 
+// Post-processing: bloom makes the emissive wireframe model and the hand joints glow,
+// which is what turns a plain mesh into a "hologram". Threshold keeps dim things un-bloomed.
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.9, 0.5, 0.7);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+// Faint "holo-deck" grid so the model reads as floating in a space, not on a black void.
+const grid = new THREE.GridHelper(20, 40, 0x1e6fff, 0x0a2a4a);
+grid.position.y = -1.6; scene.add(grid);
+
 const pivot = new THREE.Group(); // we rotate/scale this; the model lives inside it
 scene.add(pivot);
 
 function makeDefaultModel() {
   const geo = new THREE.TorusKnotGeometry(0.7, 0.24, 220, 32);
-  const mat = new THREE.MeshStandardMaterial({ color: 0x5b8cff, metalness: 0.9, roughness: 0.18 });
-  return new THREE.Mesh(geo, mat);
+  const g = new THREE.Group();
+  // translucent lit core so the 3D form still reads as a solid object...
+  g.add(new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+    color: 0x0a2a4a, emissive: 0x0aa0ff, emissiveIntensity: 0.6,
+    metalness: 0.3, roughness: 0.35, transparent: true, opacity: 0.75,
+  })));
+  // ...plus a bright wireframe overlay — the part that blooms into the hologram glow.
+  g.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    color: 0x66e0ff, wireframe: true, transparent: true, opacity: 0.9,
+  })));
+  return g;
 }
 let model = makeDefaultModel();
 pivot.add(model);
@@ -55,8 +83,42 @@ function fitToView(obj) { // center at origin and normalize size so any model fr
 }
 fitToView(model);
 
+// ---------- hand skeleton drawn INTO the 3D scene (your hand appears inside the hologram) ----------
+const MAX_JOINTS = 42;               // 2 hands * 21 landmarks
+const MAX_BONES = 2 * 24;            // 2 hands * (HAND_CONNECTIONS is 21, 24 is safe headroom)
+const joints = new THREE.InstancedMesh(
+  new THREE.SphereGeometry(0.045, 12, 12),
+  new THREE.MeshBasicMaterial({ color: 0x7CFFB2 }), MAX_JOINTS);
+joints.frustumCulled = false; scene.add(joints);
+const boneGeo = new THREE.BufferGeometry();
+boneGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_BONES * 2 * 3), 3));
+const bones = new THREE.LineSegments(boneGeo, new THREE.LineBasicMaterial({ color: 0x7CFFB2, transparent: true, opacity: 0.85 }));
+bones.frustumCulled = false; scene.add(bones);
+const _m = new THREE.Matrix4(), _hidden = new THREE.Matrix4().makeScale(0, 0, 0);
+function hideHands() {
+  for (let k = 0; k < MAX_JOINTS; k++) joints.setMatrixAt(k, _hidden);
+  joints.instanceMatrix.needsUpdate = true; boneGeo.setDrawRange(0, 0);
+}
+function updateHandViz(hands) {
+  const conns = HandLandmarker.HAND_CONNECTIONS, pos = boneGeo.attributes.position.array;
+  let j = 0, v = 0; // joint index, bone-vertex index
+  for (const hand of hands) {
+    const world = hand.map(p => landmarkToWorld(p, HAND_SPAN, HAND_DEPTH));
+    for (const p of world) if (j < MAX_JOINTS) { _m.makeTranslation(p.x, p.y, p.z); joints.setMatrixAt(j++, _m); }
+    for (const c of conns) if (v + 2 <= MAX_BONES * 2) {
+      const a = world[c.start], d = world[c.end];
+      pos.set([a.x, a.y, a.z, d.x, d.y, d.z], v * 3); v += 2;
+    }
+  }
+  for (let k = j; k < MAX_JOINTS; k++) joints.setMatrixAt(k, _hidden); // hide unused instances
+  joints.instanceMatrix.needsUpdate = true;
+  boneGeo.setDrawRange(0, v); boneGeo.attributes.position.needsUpdate = true;
+}
+hideHands();
+
 function resize() {
   renderer.setSize(innerWidth, innerHeight, false);
+  composer.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
 }
 addEventListener('resize', resize); resize();
@@ -80,7 +142,7 @@ $('reset').addEventListener('click', () => { target.rx = 0; target.ry = 0; targe
 
 // ---------- MediaPipe hand tracking ----------
 let handLandmarker = null, drawUtils = null, running = false, lastVideoTime = -1;
-let prevCenter = null, prevSpread = null;
+let prevCenter = null, prevSpread = null, idle = true;
 
 async function initHands() {
   const vision = await FilesetResolver.forVisionTasks(WASM_URL);
@@ -107,7 +169,7 @@ function applyGestures(hands) {
   if (hands.length >= 2) {                       // two hands => zoom by their separation
     const spread = twoHandSpread(hands[0], hands[1]);
     if (prevSpread != null) target.scale = clamp(target.scale + (spread - prevSpread) * ZOOM_SPEED, SCALE_MIN, SCALE_MAX);
-    prevSpread = spread; prevCenter = null;
+    prevSpread = spread; prevCenter = null; idle = false;
     stateEl.textContent = 'Zooming';
   } else if (hands.length === 1 && isPinching(hands[0], PINCH_ON)) { // one pinch => rotate by its motion
     const c = handCenter(hands[0]);
@@ -115,10 +177,10 @@ function applyGestures(hands) {
       target.ry += (c.x - prevCenter.x) * ROT_SPEED * MIRROR_X;
       target.rx += (c.y - prevCenter.y) * ROT_SPEED;
     }
-    prevCenter = c; prevSpread = null;
+    prevCenter = c; prevSpread = null; idle = false;
     stateEl.textContent = `Rotating (pinch ${pinchStrength(hands[0]).toFixed(2)})`;
-  } else {                                        // idle => release the anchors
-    prevCenter = null; prevSpread = null;
+  } else {                                        // idle => release the anchors, let it drift
+    prevCenter = null; prevSpread = null; idle = true;
     stateEl.textContent = hands.length ? 'Pinch to rotate' : 'Show a hand';
   }
 }
@@ -139,12 +201,14 @@ function loop() {
     const hands = handLandmarker.detectForVideo(video, performance.now()).landmarks || [];
     drawHands(hands);
     applyGestures(hands);
+    updateHandViz(hands);
   }
+  if (idle) target.ry += IDLE_SPIN;                // gentle drift so the hologram feels alive
   current.rx += (target.rx - current.rx) * SMOOTH; // ease toward target every frame
   current.ry += (target.ry - current.ry) * SMOOTH;
   current.scale += (target.scale - current.scale) * SMOOTH;
   pivot.rotation.set(current.rx, current.ry, 0);
   pivot.scale.setScalar(current.scale);
-  renderer.render(scene, camera);
+  composer.render();
 }
 loop();

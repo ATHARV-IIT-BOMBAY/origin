@@ -42,3 +42,14 @@ export function isPinching(hand, threshold = 0.6) {
 export function twoHandSpread(handA, handB) {
   return dist2d(handCenter(handA), handCenter(handB));
 }
+
+// Map a normalized image landmark ({x,y in [0,1]}, z ~ relative depth) into three.js
+// world space, so we can draw the hand floating inside the scene. Mirrored on X to match
+// the mirrored webcam preview: move your real hand right, the on-screen hand goes right.
+export function landmarkToWorld(pt, span = 4, depth = 1.5) {
+  return {
+    x: -(pt.x - 0.5) * span,
+    y: -(pt.y - 0.5) * span,
+    z: 1.2 - (pt.z || 0) * depth,
+  };
+}
