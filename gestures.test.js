@@ -1,6 +1,6 @@
 // gestures.test.js — the one runnable check for the gesture math.  Run: node gestures.test.js
 import assert from 'node:assert';
-import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread, landmarkToWorld, handPose } from './gestures.js';
+import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread, twoHandAngle, landmarkToWorld, handPose } from './gestures.js';
 
 // Build a synthetic 21-landmark hand: wrist at (0.5,0.9), middle knuckle at (0.5,0.6)
 // => palmSize = 0.3. Thumb/index tips are passed in so we can force open vs pinched.
@@ -30,6 +30,12 @@ assert.ok(Math.abs(handCenter(open).x - 0.5) < 0.05, 'palm center x should sit n
 const near = twoHandSpread(open, shiftX(open, 0.2));
 const far  = twoHandSpread(open, shiftX(open, 0.5));
 assert.ok(far > near, `spread must grow as hands separate (${near} -> ${far})`);
+
+// twoHandAngle: a horizontal pair reads ~0; lifting the second hand straight up rotates the
+// joining line toward -90° (image Y grows downward, so "up" is a smaller y => negative angle).
+assert.ok(Math.abs(twoHandAngle(open, shiftX(open, 0.3))) < 1e-9, 'level hands => angle ~0');
+const lifted = open.map(p => ({ x: p.x + 0.3, y: p.y - 0.3, z: p.z })); // second hand up and to the right
+assert.ok(twoHandAngle(open, lifted) < 0, 'lifting the far hand tips the roll angle negative');
 
 // landmarkToWorld: image center maps to scene origin (at the fixed hand plane), and X is
 // mirrored so a landmark on the image's right lands on the scene's left.

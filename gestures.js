@@ -43,6 +43,14 @@ export function twoHandSpread(handA, handB) {
   return dist2d(handCenter(handA), handCenter(handB));
 }
 
+// Signed angle (radians) of the line joining the two hand centers. Twisting both hands
+// like a steering wheel rotates this line; the frame-to-frame change drives roll (rotation
+// about the view axis). Callers must unwrap the delta across the ±π seam themselves.
+export function twoHandAngle(handA, handB) {
+  const a = handCenter(handA), b = handCenter(handB);
+  return Math.atan2(b.y - a.y, b.x - a.x);
+}
+
 // Map a normalized image landmark ({x,y in [0,1]}, z ~ relative depth) into three.js
 // world space, so we can draw the hand floating inside the scene. Mirrored on X to match
 // the mirrored webcam preview: move your real hand right, the on-screen hand goes right.
