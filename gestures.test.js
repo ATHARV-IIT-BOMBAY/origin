@@ -1,6 +1,6 @@
 // gestures.test.js — the one runnable check for the gesture math.  Run: node gestures.test.js
 import assert from 'node:assert';
-import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread, twoHandAngle, landmarkToWorld, handPose } from './gestures.js';
+import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread, twoHandAngle, landmarkToWorld, handPose, fitTransform } from './gestures.js';
 
 // Build a synthetic 21-landmark hand: wrist at (0.5,0.9), middle knuckle at (0.5,0.6)
 // => palmSize = 0.3. Thumb/index tips are passed in so we can force open vs pinched.
@@ -69,5 +69,18 @@ assert.equal(handPose(pointing), 'point', 'index-only extended => point');
 assert.equal(handPose(flat), 'open', 'all fingers extended => open');
 assert.equal(handPose(fist), 'fist', 'all fingers curled => fist (parks/ignores the hand)');
 assert.equal(handPose(pinched), 'pinch', 'thumb+index together => pinch');
+
+// fitTransform: a model whose geometry sits FAR from its own origin (min 10..14) must still land
+// centered on the stage with its feet on the floor — the bug was that scaling after centering
+// flung it back off-screen. Apply the returned transform and check the final world box.
+{
+  const min = { x: 10, y: 10, z: 10 }, max = { x: 12, y: 14, z: 12 }; // 2×4×2, tallest side 4
+  const t = fitTransform(min, max, 1.8, -1.6);
+  assert.ok(Math.abs(t.scale - 1.8 / 4) < 1e-9, 'scales tallest side (4) to target 1.8');
+  const world = (p, c) => t.position[c] + t.scale * p[c];             // world = position + scale*local
+  assert.ok(Math.abs((world(min, 'x') + world(max, 'x')) / 2) < 1e-9, 'centered on X after scaling');
+  assert.ok(Math.abs((world(min, 'z') + world(max, 'z')) / 2) < 1e-9, 'centered on Z after scaling');
+  assert.ok(Math.abs(world(min, 'y') - (-1.6)) < 1e-9, 'feet rest exactly on the floor');
+}
 
 console.log('gestures.test.js: all assertions passed ✓');

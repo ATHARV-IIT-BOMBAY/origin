@@ -82,3 +82,23 @@ export function handPose(hand) {
   if (pinchStrength(hand) >= 0.6) return 'pinch';
   return (idx && !mid && !rng && !pky) ? 'point' : 'open';
 }
+
+// Where to drop a freshly-loaded model so it sits centered on the holo-stage. Uploaded models
+// carry an arbitrary origin — often far from the geometry — so naively they land "at a random
+// point". Given the model's bounding box (measured at scale 1) we return the {scale, position}
+// that: scales the largest side to `target`, centers it on X/Z, and rests its bottom on `floorY`
+// (feet on the floor). ORDER MATTERS: the final world box is `position + scale*localBox`, so we
+// solve position AFTER scaling — centering before scaling (the old bug) re-adds center*(scale-1).
+export function fitTransform(min, max, target = 1.8, floorY = -1.55) {
+  const sx = max.x - min.x, sy = max.y - min.y, sz = max.z - min.z;
+  const scale = target / (Math.max(sx, sy, sz) || 1);
+  return {
+    scale,
+    position: {
+      x: -scale * (min.x + max.x) / 2, // scaled box centered on X
+      y: floorY - scale * min.y,       // scaled box bottom sits on the floor
+      z: -scale * (min.z + max.z) / 2, // ...and on Z
+    },
+  };
+}
+

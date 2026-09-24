@@ -14,7 +14,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { HandLandmarker, FilesetResolver, DrawingUtils }
   from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18';
-import { handCenter, pinchStrength, twoHandSpread, twoHandAngle, landmarkToWorld, handPose, INDEX_TIP } from './gestures.js';
+import { handCenter, pinchStrength, twoHandSpread, twoHandAngle, landmarkToWorld, handPose, fitTransform, INDEX_TIP } from './gestures.js';
 
 // ---- Tuning knobs. A webcam is a messy sensor; these are the calibration dials. ----
 // The first four are `let` because the on-screen calibration panel adjusts them live.
@@ -154,11 +154,13 @@ function makeRocket() {
 let model = makeRocket();
 pivot.add(model);
 
-function fitToView(obj) { // center at origin and normalize size so any model frames nicely
+function fitToView(obj) { // drop any model centered on the stage with its feet on the floor
+  obj.position.set(0, 0, 0); obj.scale.setScalar(1); obj.rotation.set(0, 0, 0);
+  obj.updateMatrixWorld(true);                       // measure the raw geometry extent, transform reset
   const box = new THREE.Box3().setFromObject(obj);
-  const size = box.getSize(new THREE.Vector3());
-  obj.position.sub(box.getCenter(new THREE.Vector3()));
-  obj.scale.multiplyScalar(1.8 / (Math.max(size.x, size.y, size.z) || 1));
+  const t = fitTransform(box.min, box.max, 1.8, grid.position.y); // feet on the grid plane
+  obj.scale.setScalar(t.scale);
+  obj.position.set(t.position.x, t.position.y, t.position.z);
 }
 fitToView(model);
 
