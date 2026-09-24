@@ -4,6 +4,9 @@
 
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -166,16 +169,38 @@ function resize() {
 addEventListener('resize', resize); resize();
 
 // ---------- load your own model (object URL avoids any CORS/backend) ----------
-const loader = new GLTFLoader();
+// Pick a loader by file extension and normalize its result to an Object3D we can drop in.
+// STL carries only geometry, so we wrap it in a holo-styled mesh. .blend is Blender's own
+// binary format — no browser can read it; the standard path is to export glTF from Blender.
+const LOADERS = {
+  glb:  { L: GLTFLoader, pick: r => r.scene },
+  gltf: { L: GLTFLoader, pick: r => r.scene },
+  obj:  { L: OBJLoader,  pick: r => r },
+  fbx:  { L: FBXLoader,  pick: r => r },
+  stl:  { L: STLLoader,  pick: g => new THREE.Mesh(g, new THREE.MeshStandardMaterial({
+           color: 0x143a5a, emissive: 0x0aa0ff, emissiveIntensity: BASE_EMISSIVE, metalness: 0.3, roughness: 0.35 })) },
+};
+function swapModel(obj) {
+  pivot.remove(model);
+  model = obj; fitToView(model); pivot.add(model);
+  collectParts(model); clearHighlight();
+  target.explode = current.explode = 0; target.rx = target.ry = 0; spinVel.rx = spinVel.ry = 0;
+}
 $('file').addEventListener('change', (e) => {
   const f = e.target.files[0]; if (!f) return;
+  const ext = (f.name.split('.').pop() || '').toLowerCase();
+  if (ext === 'blend') {
+    errEl.textContent = ".blend can't be read in the browser. In Blender: File ▸ Export ▸ glTF 2.0 (.glb), then load that file.";
+    e.target.value = ''; return;
+  }
+  const entry = LOADERS[ext];
+  if (!entry) { errEl.textContent = `Unsupported file “.${ext}” — use .glb, .gltf, .obj, .fbx or .stl`; e.target.value = ''; return; }
+  errEl.textContent = ''; stateEl.textContent = `Loading ${f.name}…`;
   const url = URL.createObjectURL(f);
-  loader.load(url, (gltf) => {
-    pivot.remove(model);
-    model = gltf.scene; fitToView(model); pivot.add(model);
-    collectParts(model); clearHighlight(); target.explode = current.explode = 0;
-    URL.revokeObjectURL(url);
-  }, undefined, (err) => { errEl.textContent = 'Could not load model: ' + err; });
+  new entry.L().load(url, (res) => {
+    swapModel(entry.pick(res)); URL.revokeObjectURL(url);
+    stateEl.textContent = `Loaded ${f.name}`;
+  }, undefined, (err) => { URL.revokeObjectURL(url); errEl.textContent = 'Could not load model: ' + err; });
 });
 
 // ---------- transform state: gestures set `target`, each frame eases `current` toward it ----------

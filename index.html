@@ -42,10 +42,11 @@
     <div class="row"><b>Pinch</b> one hand → rotate · <b>point</b> → inspect a part<br/>Two hands <b>apart / together</b> → explode / rebuild · two-hand pinch → zoom<br/>Make a <b>fist ✊</b> to park a hand (use one-hand gestures with both hands up)</div>
     <div class="row">
       <button id="start">Start camera</button>
-      <label class="btn" for="file">Load .glb</label>
-      <input id="file" type="file" accept=".glb,.gltf,model/gltf-binary,model/gltf+json" />
+      <label class="btn" for="file">Load 3D model</label>
+      <input id="file" type="file" accept=".glb,.gltf,.obj,.fbx,.stl,.blend,model/gltf-binary,model/gltf+json" />
       <button id="reset">Reset</button>
     </div>
+    <div class="row" style="font-size:12px;opacity:.65">Upload .glb / .gltf / .obj / .fbx / .stl. Blender file? File ▸ Export ▸ glTF 2.0 (.glb).</div>
     <div id="err"></div>
   </div>
   <script type="importmap">
