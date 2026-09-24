@@ -11,18 +11,20 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { HandLandmarker, FilesetResolver, DrawingUtils }
   from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18';
-import { handCenter, isPinching, pinchStrength, twoHandSpread, landmarkToWorld } from './gestures.js';
+import { handCenter, pinchStrength, twoHandSpread, landmarkToWorld, handPose, INDEX_TIP } from './gestures.js';
 
 // ---- Tuning knobs. A webcam is a messy sensor; these are the calibration dials. ----
 const ROT_SPEED = 6.0;    // how far a hand move rotates the model
 const ZOOM_SPEED = 6.0;   // how strongly two-hand spread scales the model
 const SMOOTH = 0.20;      // 0..1 low-pass ease; lower = smoother but laggier
 const MIRROR_X = -1;      // flip so moving your hand right rotates the model right
-const PINCH_ON = 0.6;     // pinch strength (0..1) needed to start rotating
 const SCALE_MIN = 0.3, SCALE_MAX = 4.0;
 const HAND_SPAN = 4.2;    // how wide the tracked hand maps into the 3D scene
 const HAND_DEPTH = 1.5;   // how strongly landmark depth pushes hand joints in/out
 const IDLE_SPIN = 0.0015; // lazy auto-rotate (rad/frame) when you're not controlling it
+const EXPLODE_K = 1.6;                        // full-explosion expansion: parts push out from center
+const EXPLODE_MIN = 0.20, EXPLODE_MAX = 0.75; // two-hand spread range mapped onto 0..1 explosion
+const BASE_EMISSIVE = 0.6, HIGHLIGHT_EMISSIVE = 2.4; // part glow: resting vs. aimed-at
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm';
 
@@ -58,21 +60,42 @@ grid.position.y = -1.6; scene.add(grid);
 const pivot = new THREE.Group(); // we rotate/scale this; the model lives inside it
 scene.add(pivot);
 
-function makeDefaultModel() {
-  const geo = new THREE.TorusKnotGeometry(0.7, 0.24, 220, 32);
-  const g = new THREE.Group();
-  // translucent lit core so the 3D form still reads as a solid object...
-  g.add(new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
-    color: 0x0a2a4a, emissive: 0x0aa0ff, emissiveIntensity: 0.6,
-    metalness: 0.3, roughness: 0.35, transparent: true, opacity: 0.75,
-  })));
-  // ...plus a bright wireframe overlay — the part that blooms into the hologram glow.
-  g.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-    color: 0x66e0ff, wireframe: true, transparent: true, opacity: 0.9,
-  })));
+// Hologram-styled part: translucent lit core + bright wireframe overlay (the bit that blooms).
+// Grouped so a whole part can be raycast, highlighted, and flown out as a single unit.
+function holoPart(geo, name, label, color = 0x0a2a4a, emissive = 0x0aa0ff) {
+  const core = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+    color, emissive, emissiveIntensity: BASE_EMISSIVE,
+    metalness: 0.3, roughness: 0.35, transparent: true, opacity: 0.8 }));
+  const wire = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    color: 0x66e0ff, wireframe: true, transparent: true, opacity: 0.45 }));
+  const g = new THREE.Group(); g.add(core, wire);
+  g.name = name; g.userData = { label, core };
   return g;
 }
-let model = makeDefaultModel();
+
+// Default model: a multi-part rocket (nose, tanks, engine, fins). It's recognizable, and its
+// separately-named parts are exactly what the point-to-inspect and explode gestures act on.
+function makeRocket() {
+  const R = new THREE.Group(), r = 0.42;
+  const nose = holoPart(new THREE.ConeGeometry(r, 0.9, 32), 'nose', 'Nose Cone', 0x143a5a, 0x22c0ff);
+  nose.position.y = 1.15;
+  const tankA = holoPart(new THREE.CylinderGeometry(r, r, 0.9, 32), 'tankA', 'Fuel Tank');
+  tankA.position.y = 0.35;
+  const tankB = holoPart(new THREE.CylinderGeometry(r, r, 0.9, 32), 'tankB', 'Oxidizer Tank');
+  tankB.position.y = -0.55;
+  const engine = holoPart(new THREE.CylinderGeometry(r * 0.55, r, 0.5, 32), 'engine', 'Engine Bell', 0x3a1e08, 0xff7a1a);
+  engine.position.y = -1.2;
+  R.add(nose, tankA, tankB, engine);
+  for (let i = 0; i < 3; i++) {                        // three stabilizer fins around the base
+    const fin = holoPart(new THREE.BoxGeometry(0.06, 0.5, 0.42), 'fin' + i, 'Stabilizer Fin');
+    const a = (i / 3) * Math.PI * 2;
+    fin.position.set(Math.cos(a) * (r + 0.16), -0.95, Math.sin(a) * (r + 0.16));
+    fin.rotation.y = -a;
+    R.add(fin);
+  }
+  return R;
+}
+let model = makeRocket();
 pivot.add(model);
 
 function fitToView(obj) { // center at origin and normalize size so any model frames nicely
@@ -82,6 +105,22 @@ function fitToView(obj) { // center at origin and normalize size so any model fr
   obj.scale.multiplyScalar(1.8 / (Math.max(size.x, size.y, size.z) || 1));
 }
 fitToView(model);
+
+// Parts = the model's direct children that carry geometry. Each remembers its resting
+// position (home); the explode gesture pushes every part radially out from the model's center
+// (an exploded-view expansion) and snaps them home. Parts sitting at dead-center don't travel.
+let parts = [], partSet = new Set();
+function firstMesh(o) { let m = null; o.traverse(c => { if (!m && c.isMesh) m = c; }); return m; }
+function collectParts(root) {
+  parts = root.children.filter(firstMesh);
+  partSet = new Set(parts);
+  for (const p of parts) {
+    p.userData.home = p.position.clone();
+    if (!p.userData.core) p.userData.core = firstMesh(p);
+    if (p.userData.label == null) p.userData.label = p.name || 'Part';
+  }
+}
+collectParts(model);
 
 // ---------- hand skeleton drawn INTO the 3D scene (your hand appears inside the hologram) ----------
 const MAX_JOINTS = 42;               // 2 hands * 21 landmarks
@@ -131,14 +170,48 @@ $('file').addEventListener('change', (e) => {
   loader.load(url, (gltf) => {
     pivot.remove(model);
     model = gltf.scene; fitToView(model); pivot.add(model);
+    collectParts(model); clearHighlight(); target.explode = current.explode = 0;
     URL.revokeObjectURL(url);
   }, undefined, (err) => { errEl.textContent = 'Could not load model: ' + err; });
 });
 
 // ---------- transform state: gestures set `target`, each frame eases `current` toward it ----------
-const target = { rx: 0, ry: 0, scale: 1 };
-const current = { rx: 0, ry: 0, scale: 1 };
-$('reset').addEventListener('click', () => { target.rx = 0; target.ry = 0; target.scale = 1; });
+const target = { rx: 0, ry: 0, scale: 1, explode: 0 };
+const current = { rx: 0, ry: 0, scale: 1, explode: 0 };
+$('reset').addEventListener('click', () => { target.rx = 0; target.ry = 0; target.scale = 1; target.explode = 0; });
+
+// ---------- point-to-inspect: raycast from the camera through the index fingertip ----------
+// The fingertip is drawn into the scene at a fixed plane; a ray from the camera through it
+// continues on to whatever part sits behind it — so aiming reads exactly as it looks on screen.
+const labelEl = $('label');
+const raycaster = new THREE.Raycaster();
+const _tip = new THREE.Vector3(), _proj = new THREE.Vector3();
+let highlighted = null;
+function findPart(obj) { while (obj) { if (partSet.has(obj)) return obj; obj = obj.parent; } return null; }
+function setHighlight(part) {
+  if (highlighted && highlighted !== part) {
+    const m = highlighted.userData.core?.material;
+    if (m && 'emissiveIntensity' in m) m.emissiveIntensity = BASE_EMISSIVE;
+  }
+  highlighted = part;
+  const m = part?.userData.core?.material;
+  if (m && 'emissiveIntensity' in m) m.emissiveIntensity = HIGHLIGHT_EMISSIVE;
+}
+function clearHighlight() { setHighlight(null); labelEl.style.opacity = '0'; }
+function pointAt(hand) {                          // highlight+label the aimed part; return its label or null
+  const w = landmarkToWorld(hand[INDEX_TIP], HAND_SPAN, HAND_DEPTH);
+  raycaster.set(camera.position, _tip.set(w.x, w.y, w.z).sub(camera.position).normalize());
+  const hit = raycaster.intersectObject(pivot, true)[0];
+  const part = hit ? findPart(hit.object) : null;
+  setHighlight(part);
+  if (!part) { labelEl.style.opacity = '0'; return null; }
+  _proj.copy(hit.point).project(camera);
+  const x = (_proj.x * 0.5 + 0.5) * innerWidth, y = (-_proj.y * 0.5 + 0.5) * innerHeight;
+  labelEl.textContent = part.userData.label;
+  labelEl.style.transform = `translate(-50%,-150%) translate(${x}px,${y}px)`;
+  labelEl.style.opacity = '1';
+  return part.userData.label;
+}
 
 // ---------- MediaPipe hand tracking ----------
 let handLandmarker = null, drawUtils = null, running = false, lastVideoTime = -1;
@@ -166,22 +239,33 @@ async function startCamera() {
 $('start').addEventListener('click', startCamera);
 
 function applyGestures(hands) {
-  if (hands.length >= 2) {                       // two hands => zoom by their separation
+  if (hands.length >= 2) {
     const spread = twoHandSpread(hands[0], hands[1]);
-    if (prevSpread != null) target.scale = clamp(target.scale + (spread - prevSpread) * ZOOM_SPEED, SCALE_MIN, SCALE_MAX);
-    prevSpread = spread; prevCenter = null; idle = false;
-    stateEl.textContent = 'Zooming';
-  } else if (hands.length === 1 && isPinching(hands[0], PINCH_ON)) { // one pinch => rotate by its motion
+    prevCenter = null; idle = false;
+    if (handPose(hands[0]) === 'pinch' && handPose(hands[1]) === 'pinch') { // two fists => zoom
+      if (prevSpread != null) target.scale = clamp(target.scale + (spread - prevSpread) * ZOOM_SPEED, SCALE_MIN, SCALE_MAX);
+      prevSpread = spread; clearHighlight();
+      stateEl.textContent = 'Zoom';
+    } else {                                                                // two open hands => explode by their gap
+      target.explode = clamp((spread - EXPLODE_MIN) / (EXPLODE_MAX - EXPLODE_MIN), 0, 1);
+      prevSpread = null; clearHighlight();
+      stateEl.textContent = target.explode > 0.05 ? `Exploded ${Math.round(target.explode * 100)}%` : 'Spread hands to explode';
+    }
+  } else if (hands.length === 1 && handPose(hands[0]) === 'pinch') {         // one pinch => rotate by its motion
     const c = handCenter(hands[0]);
     if (prevCenter) {
       target.ry += (c.x - prevCenter.x) * ROT_SPEED * MIRROR_X;
       target.rx += (c.y - prevCenter.y) * ROT_SPEED;
     }
-    prevCenter = c; prevSpread = null; idle = false;
-    stateEl.textContent = `Rotating (pinch ${pinchStrength(hands[0]).toFixed(2)})`;
-  } else {                                        // idle => release the anchors, let it drift
-    prevCenter = null; prevSpread = null; idle = true;
-    stateEl.textContent = hands.length ? 'Pinch to rotate' : 'Show a hand';
+    prevCenter = c; prevSpread = null; idle = false; clearHighlight();
+    stateEl.textContent = `Rotate (pinch ${pinchStrength(hands[0]).toFixed(2)})`;
+  } else if (hands.length === 1 && handPose(hands[0]) === 'point') {          // one pointing finger => inspect a part
+    prevCenter = null; prevSpread = null; idle = false;
+    const name = pointAt(hands[0]);
+    stateEl.textContent = name ? `▶ ${name}` : 'Point at a part';
+  } else {                                                                    // idle => release anchors, let it drift
+    prevCenter = null; prevSpread = null; idle = true; clearHighlight();
+    stateEl.textContent = hands.length ? 'Pinch = rotate · point = inspect' : 'Show a hand';
   }
 }
 
@@ -207,6 +291,8 @@ function loop() {
   current.rx += (target.rx - current.rx) * SMOOTH; // ease toward target every frame
   current.ry += (target.ry - current.ry) * SMOOTH;
   current.scale += (target.scale - current.scale) * SMOOTH;
+  current.explode += (target.explode - current.explode) * SMOOTH;
+  for (const p of parts) p.position.copy(p.userData.home).multiplyScalar(1 + current.explode * EXPLODE_K);
   pivot.rotation.set(current.rx, current.ry, 0);
   pivot.scale.setScalar(current.scale);
   composer.render();

@@ -53,3 +53,21 @@ export function landmarkToWorld(pt, span = 4, depth = 1.5) {
     z: 1.2 - (pt.z || 0) * depth,
   };
 }
+
+// A finger is "extended" when its tip reaches noticeably farther from the wrist than its
+// middle (PIP) joint — i.e. straightened, not curled back toward the palm. Rotation-robust
+// because it compares distances, not absolute up/down. (tip, pip) are landmark indices.
+export function fingerExtended(hand, tip, pip) {
+  return dist2d(hand[tip], hand[WRIST]) > dist2d(hand[pip], hand[WRIST]) * 1.15;
+}
+
+// Classify the hand into the one pose we act on: 'pinch' | 'point' | 'open'.
+// pinch = thumb+index together (grab), point = only the index finger out (aim), else open.
+export function handPose(hand) {
+  if (pinchStrength(hand) >= 0.6) return 'pinch';
+  const idx = fingerExtended(hand, 8, 6);
+  const mid = fingerExtended(hand, 12, 10);
+  const rng = fingerExtended(hand, 16, 14);
+  const pky = fingerExtended(hand, 20, 18);
+  return (idx && !mid && !rng && !pky) ? 'point' : 'open';
+}

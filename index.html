@@ -25,15 +25,21 @@
   button:hover, label.btn:hover { background: #3a6be7; }
   #err { color: #ff8080; margin-top: 8px; }
   input[type=file] { display: none; }
+  /* floating part label that tracks the pointed-at component in screen space */
+  #label { position: fixed; left: 0; top: 0; pointer-events: none; opacity: 0;
+           transition: opacity .12s; padding: 4px 10px; border-radius: 8px; white-space: nowrap;
+           font-size: 14px; font-weight: 600; color: #dff6ff; background: rgba(10,30,60,.72);
+           border: 1px solid #2aa0ff; box-shadow: 0 0 18px rgba(42,160,255,.6); }
 </style>
 </head>
 <body>
   <canvas id="three"></canvas>
+  <div id="label"></div>
   <div id="cam"><video id="video" playsinline muted></video><canvas id="overlay"></canvas></div>
   <div id="hud">
     <div><b>HoloControl</b> — hands-free 3D</div>
     <div id="state">Camera off</div>
-    <div class="row">Pinch one hand → <b>rotate</b><br/>Two hands, move apart / together → <b>zoom</b></div>
+    <div class="row"><b>Pinch</b> one hand → rotate · <b>point</b> → inspect a part<br/>Two hands <b>apart / together</b> → explode / rebuild · two-hand pinch → zoom</div>
     <div class="row">
       <button id="start">Start camera</button>
       <label class="btn" for="file">Load .glb</label>

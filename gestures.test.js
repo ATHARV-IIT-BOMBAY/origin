@@ -1,6 +1,6 @@
 // gestures.test.js — the one runnable check for the gesture math.  Run: node gestures.test.js
 import assert from 'node:assert';
-import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread, landmarkToWorld } from './gestures.js';
+import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread, landmarkToWorld, handPose } from './gestures.js';
 
 // Build a synthetic 21-landmark hand: wrist at (0.5,0.9), middle knuckle at (0.5,0.6)
 // => palmSize = 0.3. Thumb/index tips are passed in so we can force open vs pinched.
@@ -37,5 +37,29 @@ const mid = landmarkToWorld({ x: 0.5, y: 0.5, z: 0 }, 4, 1.5);
 assert.ok(Math.abs(mid.x) < 1e-9 && Math.abs(mid.y) < 1e-9, 'image center -> world origin (x,y)');
 assert.ok(landmarkToWorld({ x: 0.9, y: 0.5, z: 0 }, 4).x < 0, 'X is mirrored');
 assert.ok(landmarkToWorld({ x: 0.5, y: 0.9, z: 0 }, 4).y < 0, 'image bottom -> lower Y');
+
+// handPose: build a hand where each finger is independently extended or curled. Extended
+// finger => tip far from wrist (small y); curled => tip pulled back near the palm (large y).
+// Thumb tip sits off to the side so the hand never reads as a pinch here.
+function poseHand({ index, middle, ring, pinky }) {
+  const h = Array.from({ length: 21 }, () => ({ x: 0.5, y: 0.6, z: 0 }));
+  h[0] = { x: 0.50, y: 0.90, z: 0 };            // wrist
+  h[9] = { x: 0.50, y: 0.60, z: 0 };            // middle knuckle => palmSize 0.3
+  h[4] = { x: 0.30, y: 0.60, z: 0 };            // thumb tip, far from index => not a pinch
+  const finger = (mcpX, extended, tip, pip) => {
+    h[pip] = { x: mcpX, y: extended ? 0.45 : 0.55, z: 0 };
+    h[tip] = { x: mcpX, y: extended ? 0.20 : 0.72, z: 0 };
+  };
+  finger(0.45, index,  8,  6);
+  finger(0.50, middle, 12, 10);
+  finger(0.55, ring,   16, 14);
+  finger(0.60, pinky,  20, 18);
+  return h;
+}
+const pointing = poseHand({ index: true,  middle: false, ring: false, pinky: false });
+const flat     = poseHand({ index: true,  middle: true,  ring: true,  pinky: true });
+assert.equal(handPose(pointing), 'point', 'index-only extended => point');
+assert.equal(handPose(flat), 'open', 'all fingers extended => open');
+assert.equal(handPose(pinched), 'pinch', 'thumb+index together => pinch');
 
 console.log('gestures.test.js: all assertions passed ✓');
