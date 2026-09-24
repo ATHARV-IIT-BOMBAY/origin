@@ -61,13 +61,16 @@ export function fingerExtended(hand, tip, pip) {
   return dist2d(hand[tip], hand[WRIST]) > dist2d(hand[pip], hand[WRIST]) * 1.15;
 }
 
-// Classify the hand into the one pose we act on: 'pinch' | 'point' | 'open'.
-// pinch = thumb+index together (grab), point = only the index finger out (aim), else open.
+// Classify the hand into the one pose we act on: 'fist' | 'pinch' | 'point' | 'open'.
+// fist = every finger curled (used to "park"/ignore a hand), pinch = thumb+index together
+// (grab), point = only the index finger out (aim), else open. Fist is tested before pinch:
+// a tight fist tucks the thumb against the index and would otherwise misread as a pinch.
 export function handPose(hand) {
-  if (pinchStrength(hand) >= 0.6) return 'pinch';
   const idx = fingerExtended(hand, 8, 6);
   const mid = fingerExtended(hand, 12, 10);
   const rng = fingerExtended(hand, 16, 14);
   const pky = fingerExtended(hand, 20, 18);
+  if (!idx && !mid && !rng && !pky) return 'fist';
+  if (pinchStrength(hand) >= 0.6) return 'pinch';
   return (idx && !mid && !rng && !pky) ? 'point' : 'open';
 }

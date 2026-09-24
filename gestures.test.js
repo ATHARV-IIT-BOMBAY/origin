@@ -58,8 +58,10 @@ function poseHand({ index, middle, ring, pinky }) {
 }
 const pointing = poseHand({ index: true,  middle: false, ring: false, pinky: false });
 const flat     = poseHand({ index: true,  middle: true,  ring: true,  pinky: true });
+const fist     = poseHand({ index: false, middle: false, ring: false, pinky: false });
 assert.equal(handPose(pointing), 'point', 'index-only extended => point');
 assert.equal(handPose(flat), 'open', 'all fingers extended => open');
+assert.equal(handPose(fist), 'fist', 'all fingers curled => fist (parks/ignores the hand)');
 assert.equal(handPose(pinched), 'pinch', 'thumb+index together => pinch');
 
 console.log('gestures.test.js: all assertions passed ✓');

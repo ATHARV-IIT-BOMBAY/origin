@@ -239,33 +239,42 @@ async function startCamera() {
 $('start').addEventListener('click', startCamera);
 
 function applyGestures(hands) {
-  if (hands.length >= 2) {
-    const spread = twoHandSpread(hands[0], hands[1]);
-    prevCenter = null; idle = false;
-    if (handPose(hands[0]) === 'pinch' && handPose(hands[1]) === 'pinch') { // two fists => zoom
+  // A fist "parks" a hand — we ignore it — so you can drive one-hand gestures with your other
+  // hand while both stay comfortably in frame (no yanking a hand out of view to change modes).
+  // Two fists = pause everything. We classify each hand once, then act on the live ones only.
+  const active = hands.map(h => ({ h, pose: handPose(h) })).filter(a => a.pose !== 'fist');
+  const parked = hands.length - active.length;
+
+  if (active.length >= 2) {                                                  // two live hands
+    const spread = twoHandSpread(active[0].h, active[1].h);
+    prevCenter = null; idle = false; clearHighlight();
+    if (active[0].pose === 'pinch' && active[1].pose === 'pinch') {          // two pinches => zoom
       if (prevSpread != null) target.scale = clamp(target.scale + (spread - prevSpread) * ZOOM_SPEED, SCALE_MIN, SCALE_MAX);
-      prevSpread = spread; clearHighlight();
+      prevSpread = spread;
       stateEl.textContent = 'Zoom';
-    } else {                                                                // two open hands => explode by their gap
+    } else {                                                                 // else => explode by gap
       target.explode = clamp((spread - EXPLODE_MIN) / (EXPLODE_MAX - EXPLODE_MIN), 0, 1);
-      prevSpread = null; clearHighlight();
+      prevSpread = null;
       stateEl.textContent = target.explode > 0.05 ? `Exploded ${Math.round(target.explode * 100)}%` : 'Spread hands to explode';
     }
-  } else if (hands.length === 1 && handPose(hands[0]) === 'pinch') {         // one pinch => rotate by its motion
-    const c = handCenter(hands[0]);
+  } else if (active.length === 1 && active[0].pose === 'pinch') {            // one pinch => rotate
+    const c = handCenter(active[0].h);
     if (prevCenter) {
       target.ry += (c.x - prevCenter.x) * ROT_SPEED * MIRROR_X;
       target.rx += (c.y - prevCenter.y) * ROT_SPEED;
     }
     prevCenter = c; prevSpread = null; idle = false; clearHighlight();
-    stateEl.textContent = `Rotate (pinch ${pinchStrength(hands[0]).toFixed(2)})`;
-  } else if (hands.length === 1 && handPose(hands[0]) === 'point') {          // one pointing finger => inspect a part
+    stateEl.textContent = `Rotate (pinch ${pinchStrength(active[0].h).toFixed(2)})`;
+  } else if (active.length === 1 && active[0].pose === 'point') {            // one point => inspect
     prevCenter = null; prevSpread = null; idle = false;
-    const name = pointAt(hands[0]);
+    const name = pointAt(active[0].h);
     stateEl.textContent = name ? `▶ ${name}` : 'Point at a part';
-  } else {                                                                    // idle => release anchors, let it drift
+  } else {                                                                   // nothing live => drift
     prevCenter = null; prevSpread = null; idle = true; clearHighlight();
-    stateEl.textContent = hands.length ? 'Pinch = rotate · point = inspect' : 'Show a hand';
+    stateEl.textContent = parked >= 2 ? '✊ paused'
+      : parked ? '✊ parked — other hand is free'
+      : hands.length ? 'Pinch = rotate · point = inspect · ✊ = park'
+      : 'Show a hand';
   }
 }
 
