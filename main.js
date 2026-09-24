@@ -22,6 +22,9 @@ const SCALE_MIN = 0.3, SCALE_MAX = 4.0;
 const HAND_SPAN = 4.2;    // how wide the tracked hand maps into the 3D scene
 const HAND_DEPTH = 1.5;   // how strongly landmark depth pushes hand joints in/out
 const IDLE_SPIN = 0.0015; // lazy auto-rotate (rad/frame) when you're not controlling it
+// Flick-to-spin: while pinch-dragging we track the swipe velocity; on release the model keeps
+// spinning and eases to rest (friction). CAPTURE = how much the latest frame feeds the estimate.
+const SPIN_FRICTION = 0.96, SPIN_CAPTURE = 0.5, SPIN_MIN = 0.001;
 const EXPLODE_K = 1.6;                        // full-explosion expansion: parts push out from center
 const EXPLODE_MIN = 0.20, EXPLODE_MAX = 0.75; // two-hand spread range mapped onto 0..1 explosion
 const BASE_EMISSIVE = 0.6, HIGHLIGHT_EMISSIVE = 2.4; // part glow: resting vs. aimed-at
@@ -178,7 +181,7 @@ $('file').addEventListener('change', (e) => {
 // ---------- transform state: gestures set `target`, each frame eases `current` toward it ----------
 const target = { rx: 0, ry: 0, scale: 1, explode: 0 };
 const current = { rx: 0, ry: 0, scale: 1, explode: 0 };
-$('reset').addEventListener('click', () => { target.rx = 0; target.ry = 0; target.scale = 1; target.explode = 0; });
+$('reset').addEventListener('click', () => { target.rx = 0; target.ry = 0; target.scale = 1; target.explode = 0; spinVel.rx = spinVel.ry = 0; });
 
 // ---------- point-to-inspect: raycast from the camera through the index fingertip ----------
 // The fingertip is drawn into the scene at a fixed plane; a ray from the camera through it
@@ -216,6 +219,8 @@ function pointAt(hand) {                          // highlight+label the aimed p
 // ---------- MediaPipe hand tracking ----------
 let handLandmarker = null, drawUtils = null, running = false, lastVideoTime = -1;
 let prevCenter = null, prevSpread = null, idle = true;
+let dragging = false;                 // true while a pinch is actively rotating the model
+const spinVel = { rx: 0, ry: 0 };     // leftover angular velocity after you let go (flick-to-spin)
 
 async function initHands() {
   const vision = await FilesetResolver.forVisionTasks(WASM_URL);
@@ -244,6 +249,7 @@ function applyGestures(hands) {
   // Two fists = pause everything. We classify each hand once, then act on the live ones only.
   const active = hands.map(h => ({ h, pose: handPose(h) })).filter(a => a.pose !== 'fist');
   const parked = hands.length - active.length;
+  dragging = false;                                                        // set true only while rotating
 
   if (active.length >= 2) {                                                  // two live hands
     const spread = twoHandSpread(active[0].h, active[1].h);
@@ -260,10 +266,13 @@ function applyGestures(hands) {
   } else if (active.length === 1 && active[0].pose === 'pinch') {            // one pinch => rotate
     const c = handCenter(active[0].h);
     if (prevCenter) {
-      target.ry += (c.x - prevCenter.x) * ROT_SPEED * MIRROR_X;
-      target.rx += (c.y - prevCenter.y) * ROT_SPEED;
+      const dry = (c.x - prevCenter.x) * ROT_SPEED * MIRROR_X;
+      const drx = (c.y - prevCenter.y) * ROT_SPEED;
+      target.ry += dry; target.rx += drx;
+      spinVel.ry = spinVel.ry * (1 - SPIN_CAPTURE) + dry * SPIN_CAPTURE;    // recent-weighted flick speed
+      spinVel.rx = spinVel.rx * (1 - SPIN_CAPTURE) + drx * SPIN_CAPTURE;
     }
-    prevCenter = c; prevSpread = null; idle = false; clearHighlight();
+    prevCenter = c; prevSpread = null; idle = false; dragging = true; clearHighlight();
     stateEl.textContent = `Rotate (pinch ${pinchStrength(active[0].h).toFixed(2)})`;
   } else if (active.length === 1 && active[0].pose === 'point') {            // one point => inspect
     prevCenter = null; prevSpread = null; idle = false;
@@ -296,7 +305,11 @@ function loop() {
     applyGestures(hands);
     updateHandViz(hands);
   }
-  if (idle) target.ry += IDLE_SPIN;                // gentle drift so the hologram feels alive
+  if (!dragging && (spinVel.rx || spinVel.ry)) {   // flick momentum: keep spinning, then ease to rest
+    target.ry += spinVel.ry; target.rx += spinVel.rx;
+    spinVel.ry *= SPIN_FRICTION; spinVel.rx *= SPIN_FRICTION;
+    if (Math.hypot(spinVel.rx, spinVel.ry) < SPIN_MIN) spinVel.rx = spinVel.ry = 0;
+  } else if (idle) target.ry += IDLE_SPIN;         // gentle drift so the hologram feels alive
   current.rx += (target.rx - current.rx) * SMOOTH; // ease toward target every frame
   current.ry += (target.ry - current.ry) * SMOOTH;
   current.scale += (target.scale - current.scale) * SMOOTH;
