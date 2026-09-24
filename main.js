@@ -148,14 +148,41 @@ const boneGeo = new THREE.BufferGeometry();
 boneGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_BONES * 2 * 3), 3));
 const bones = new THREE.LineSegments(boneGeo, new THREE.LineBasicMaterial({ color: 0x7CFFB2, transparent: true, opacity: 0.85 }));
 bones.frustumCulled = false; scene.add(bones);
+
+// Fingertip comet-trails: a short additive line trailing each hand's index tip, fading tail->tip (JARVIS feel).
+const TRAIL_LEN = 18, TRAIL_RGB = [0.4, 0.9, 1.0];
+const trails = [0, 1].map(() => {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(TRAIL_LEN * 3), 3));
+  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(TRAIL_LEN * 3), 3));
+  const line = new THREE.Line(g, new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }));
+  line.frustumCulled = false; scene.add(line);
+  return { line, hist: [] };
+});
+function updateTrail(slot, tip) {            // tip = world {x,y,z}, or null to shrink the tail away
+  const t = trails[slot]; if (!t) return;
+  if (tip) { t.hist.push(tip); while (t.hist.length > TRAIL_LEN) t.hist.shift(); }
+  else if (t.hist.length) t.hist.shift();
+  const n = t.hist.length, P = t.line.geometry.attributes.position.array, C = t.line.geometry.attributes.color.array;
+  for (let k = 0; k < n; k++) {
+    const p = t.hist[k], f = n > 1 ? k / (n - 1) : 1;    // 0 at tail, 1 at fingertip
+    P[k*3] = p.x; P[k*3+1] = p.y; P[k*3+2] = p.z;
+    C[k*3] = TRAIL_RGB[0]*f; C[k*3+1] = TRAIL_RGB[1]*f; C[k*3+2] = TRAIL_RGB[2]*f;
+  }
+  t.line.geometry.setDrawRange(0, n);
+  t.line.geometry.attributes.position.needsUpdate = true;
+  t.line.geometry.attributes.color.needsUpdate = true;
+}
 const _m = new THREE.Matrix4(), _hidden = new THREE.Matrix4().makeScale(0, 0, 0);
 function hideHands() {
   for (let k = 0; k < MAX_JOINTS; k++) joints.setMatrixAt(k, _hidden);
   joints.instanceMatrix.needsUpdate = true; boneGeo.setDrawRange(0, 0);
+  for (const t of trails) { t.hist.length = 0; t.line.geometry.setDrawRange(0, 0); }
 }
 function updateHandViz(hands) {
   const conns = HandLandmarker.HAND_CONNECTIONS, pos = boneGeo.attributes.position.array;
-  let j = 0, v = 0; // joint index, bone-vertex index
+  let j = 0, v = 0, hi = 0; // joint index, bone-vertex index, hand slot
   for (const hand of hands) {
     const world = hand.map(p => landmarkToWorld(p, HAND_SPAN, HAND_DEPTH));
     for (const p of world) if (j < MAX_JOINTS) { _m.makeTranslation(p.x, p.y, p.z); joints.setMatrixAt(j++, _m); }
@@ -163,7 +190,9 @@ function updateHandViz(hands) {
       const a = world[c.start], d = world[c.end];
       pos.set([a.x, a.y, a.z, d.x, d.y, d.z], v * 3); v += 2;
     }
+    updateTrail(hi++, world[INDEX_TIP]);
   }
+  for (let s = hi; s < trails.length; s++) updateTrail(s, null); // fade out trails for absent hands
   for (let k = j; k < MAX_JOINTS; k++) joints.setMatrixAt(k, _hidden); // hide unused instances
   joints.instanceMatrix.needsUpdate = true;
   boneGeo.setDrawRange(0, v); boneGeo.attributes.position.needsUpdate = true;
