@@ -73,6 +73,10 @@ Open <http://localhost:8000>, click **Start camera**, and allow access. Drop in 
 **Load 3D model** — `.glb`, `.gltf`, `.obj`, `.fbx`, or `.stl`. It's read locally; nothing is uploaded.
 (Blender file? Export ▸ glTF 2.0 (.glb).) With no model loaded you get a built-in rocket to play with.
 
+Sample models to test the loader live in [`models/`](models/): a 6-part **robot** in `.glb` / `.gltf` / `.obj`
+(the glTF/GLB versions have separate parts, so the explode gesture pulls the limbs apart) and a single-piece
+**crystal** in `.stl`. Regenerate them anytime with `node make_samples.mjs`.
+
 ## Test the gesture math
 
 The geometry in `gestures.js` is pure — no camera, no DOM — so it runs and checks itself in Node:
