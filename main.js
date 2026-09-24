@@ -38,6 +38,33 @@ const $ = (id) => document.getElementById(id);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const video = $('video'), overlay = $('overlay'), stateEl = $('state'), errEl = $('err');
 
+// ---------- Web Audio: tiny synth blips for gesture feedback (no audio files) ----------
+// A gesture is invisible until it "clicks" — a short tone on each mode change makes the
+// interface feel physical. Ctx is created on a user click (autoplay policy) and reused.
+let audioCtx = null;
+function initAudio() {
+  if (!audioCtx) { try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch {} }
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+}
+function blip(freq = 660, dur = 0.08, type = 'sine', peak = 0.06) {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime, osc = audioCtx.createOscillator(), g = audioCtx.createGain();
+  osc.type = type; osc.frequency.setValueAtTime(freq, t);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(peak, t + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.connect(g).connect(audioCtx.destination); osc.start(t); osc.stop(t + dur + 0.02);
+}
+const SFX = {                       // sound played when we ENTER each mode (fires once per transition)
+  rotate:  () => blip(520, 0.07, 'sine'),
+  zoom:    () => blip(760, 0.09, 'triangle'),
+  explode: () => blip(300, 0.12, 'sawtooth', 0.05),
+  inspect: () => blip(880, 0.05, 'square', 0.03),
+  park:    () => blip(200, 0.10, 'sine'),
+  pause:   () => blip(150, 0.16, 'sine'),
+};
+let lastMode = '';
+function setMode(m) { if (m === lastMode) return; lastMode = m; (SFX[m] || null)?.(); }
+
 // ---------- three.js scene ----------
 const renderer = new THREE.WebGLRenderer({ canvas: $('three'), antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -226,6 +253,7 @@ function swapModel(obj) {
 }
 $('file').addEventListener('change', (e) => {
   const f = e.target.files[0]; if (!f) return;
+  initAudio();
   const ext = (f.name.split('.').pop() || '').toLowerCase();
   if (ext === 'blend') {
     errEl.textContent = ".blend can't be read in the browser. In Blender: File ▸ Export ▸ glTF 2.0 (.glb), then load that file.";
@@ -237,14 +265,14 @@ $('file').addEventListener('change', (e) => {
   const url = URL.createObjectURL(f);
   new entry.L().load(url, (res) => {
     swapModel(entry.pick(res)); URL.revokeObjectURL(url);
-    stateEl.textContent = `Loaded ${f.name}`;
+    stateEl.textContent = `Loaded ${f.name}`; blip(720, 0.14, 'triangle');
   }, undefined, (err) => { URL.revokeObjectURL(url); errEl.textContent = 'Could not load model: ' + err; });
 });
 
 // ---------- transform state: gestures set `target`, each frame eases `current` toward it ----------
 const target = { rx: 0, ry: 0, scale: 1, explode: 0 };
 const current = { rx: 0, ry: 0, scale: 1, explode: 0 };
-$('reset').addEventListener('click', () => { target.rx = 0; target.ry = 0; target.scale = 1; target.explode = 0; spinVel.rx = spinVel.ry = 0; });
+$('reset').addEventListener('click', () => { initAudio(); blip(420, 0.12, 'sine'); target.rx = 0; target.ry = 0; target.scale = 1; target.explode = 0; spinVel.rx = spinVel.ry = 0; });
 
 // ---------- point-to-inspect: raycast from the camera through the index fingertip ----------
 // The fingertip is drawn into the scene at a fixed plane; a ray from the camera through it
@@ -296,7 +324,7 @@ async function initHands() {
 
 async function startCamera() {
   try {
-    errEl.textContent = '';
+    errEl.textContent = ''; initAudio();
     if (!handLandmarker) { stateEl.textContent = 'Loading model…'; await initHands(); }
     video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
     await video.play();
@@ -320,11 +348,12 @@ function applyGestures(hands) {
     if (active[0].pose === 'pinch' && active[1].pose === 'pinch') {          // two pinches => zoom
       if (prevSpread != null) target.scale = clamp(target.scale + (spread - prevSpread) * ZOOM_SPEED, SCALE_MIN, SCALE_MAX);
       prevSpread = spread;
-      stateEl.textContent = 'Zoom';
+      stateEl.textContent = 'Zoom'; setMode('zoom');
     } else {                                                                 // else => explode by gap
       target.explode = clamp((spread - EXPLODE_MIN) / (EXPLODE_MAX - EXPLODE_MIN), 0, 1);
       prevSpread = null;
       stateEl.textContent = target.explode > 0.05 ? `Exploded ${Math.round(target.explode * 100)}%` : 'Spread hands to explode';
+      setMode('explode');
     }
   } else if (active.length === 1 && active[0].pose === 'pinch') {            // one pinch => rotate
     const c = handCenter(active[0].h);
@@ -336,17 +365,18 @@ function applyGestures(hands) {
       spinVel.rx = spinVel.rx * (1 - SPIN_CAPTURE) + drx * SPIN_CAPTURE;
     }
     prevCenter = c; prevSpread = null; idle = false; dragging = true; clearHighlight();
-    stateEl.textContent = `Rotate (pinch ${pinchStrength(active[0].h).toFixed(2)})`;
+    stateEl.textContent = `Rotate (pinch ${pinchStrength(active[0].h).toFixed(2)})`; setMode('rotate');
   } else if (active.length === 1 && active[0].pose === 'point') {            // one point => inspect
     prevCenter = null; prevSpread = null; idle = false;
     const name = pointAt(active[0].h);
-    stateEl.textContent = name ? `▶ ${name}` : 'Point at a part';
+    stateEl.textContent = name ? `▶ ${name}` : 'Point at a part'; setMode('inspect');
   } else {                                                                   // nothing live => drift
     prevCenter = null; prevSpread = null; idle = true; clearHighlight();
     stateEl.textContent = parked >= 2 ? '✊ paused'
       : parked ? '✊ parked — other hand is free'
       : hands.length ? 'Pinch = rotate · point = inspect · ✊ = park'
       : 'Show a hand';
+    setMode(parked >= 2 ? 'pause' : parked ? 'park' : 'idle');
   }
 }
 
