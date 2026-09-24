@@ -63,6 +63,15 @@ composer.addPass(new OutputPass());
 const grid = new THREE.GridHelper(20, 40, 0x1e6fff, 0x0a2a4a);
 grid.position.y = -1.6; scene.add(grid);
 
+// Holo-projector base: two counter-rotating tech rings under the model (bloom makes them glow).
+const reticle = new THREE.Group(); reticle.position.y = -1.55; scene.add(reticle);
+const _up = new THREE.Vector3(0, 1, 0);
+for (const [rIn, rOut, dir] of [[1.70, 1.86, 1], [1.96, 2.02, -1]]) {
+  const ring = new THREE.Mesh(new THREE.RingGeometry(rIn, rOut, 96),
+    new THREE.MeshBasicMaterial({ color: 0x2aa0ff, transparent: true, opacity: 0.55, side: THREE.DoubleSide }));
+  ring.rotation.x = -Math.PI / 2; ring.userData.dir = dir; reticle.add(ring);
+}
+
 const pivot = new THREE.Group(); // we rotate/scale this; the model lives inside it
 scene.add(pivot);
 
@@ -342,6 +351,7 @@ function loop() {
   for (const p of parts) p.position.copy(p.userData.home).multiplyScalar(1 + current.explode * EXPLODE_K);
   pivot.rotation.set(current.rx, current.ry, 0);
   pivot.scale.setScalar(current.scale);
+  for (const r of reticle.children) r.rotateOnWorldAxis(_up, 0.004 * r.userData.dir); // flat spin, projector look
   composer.render();
 }
 loop();

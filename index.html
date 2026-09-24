@@ -30,10 +30,19 @@
            transition: opacity .12s; padding: 4px 10px; border-radius: 8px; white-space: nowrap;
            font-size: 14px; font-weight: 600; color: #dff6ff; background: rgba(10,30,60,.72);
            border: 1px solid #2aa0ff; box-shadow: 0 0 18px rgba(42,160,255,.6); }
+  /* full-screen holo FX: faint drifting scanlines + a dark vignette, above the canvas but click-through */
+  #fx { position: fixed; inset: 0; pointer-events: none; z-index: 5;
+        background: repeating-linear-gradient(to bottom, transparent 0 2px, rgba(120,200,255,.05) 3px, transparent 4px);
+        animation: scan 7s linear infinite; }
+  #fx::after { content: ""; position: absolute; inset: 0; box-shadow: inset 0 0 260px rgba(0,0,0,.7);
+               border: 1px solid rgba(42,160,255,.1); }
+  @keyframes scan { to { background-position: 0 96px; } }
+  #cam, #hud, #label { z-index: 10; }
 </style>
 </head>
 <body>
   <canvas id="three"></canvas>
+  <div id="fx"></div>
   <div id="label"></div>
   <div id="cam"><video id="video" playsinline muted></video><canvas id="overlay"></canvas></div>
   <div id="hud">
