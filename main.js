@@ -36,7 +36,7 @@ const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/w
 
 const $ = (id) => document.getElementById(id);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-const video = $('video'), overlay = $('overlay'), stateEl = $('state'), errEl = $('err');
+const video = $('video'), overlay = $('overlay'), stateEl = $('state'), errEl = $('err'), poseEl = $('pose');
 
 // ---------- Web Audio: tiny synth blips for gesture feedback (no audio files) ----------
 // A gesture is invisible until it "clicks" — a short tone on each mode change makes the
@@ -169,8 +169,9 @@ const MAX_JOINTS = 42;               // 2 hands * 21 landmarks
 const MAX_BONES = 2 * 24;            // 2 hands * (HAND_CONNECTIONS is 21, 24 is safe headroom)
 const joints = new THREE.InstancedMesh(
   new THREE.SphereGeometry(0.045, 12, 12),
-  new THREE.MeshBasicMaterial({ color: 0x7CFFB2 }), MAX_JOINTS);
+  new THREE.MeshBasicMaterial({ color: 0xffffff }), MAX_JOINTS);   // per-instance color set in updateHandViz
 joints.frustumCulled = false; scene.add(joints);
+const JOINT_LIVE = new THREE.Color(0x7CFFB2), JOINT_PARK = new THREE.Color(0xff5a5a); // green = live, red = parked (fist)
 const boneGeo = new THREE.BufferGeometry();
 boneGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_BONES * 2 * 3), 3));
 const bones = new THREE.LineSegments(boneGeo, new THREE.LineBasicMaterial({ color: 0x7CFFB2, transparent: true, opacity: 0.85 }));
@@ -212,7 +213,8 @@ function updateHandViz(hands) {
   let j = 0, v = 0, hi = 0; // joint index, bone-vertex index, hand slot
   for (const hand of hands) {
     const world = hand.map(p => landmarkToWorld(p, HAND_SPAN, HAND_DEPTH));
-    for (const p of world) if (j < MAX_JOINTS) { _m.makeTranslation(p.x, p.y, p.z); joints.setMatrixAt(j++, _m); }
+    const col = handPose(hand) === 'fist' ? JOINT_PARK : JOINT_LIVE;     // parked hand's joints glow red
+    for (const p of world) if (j < MAX_JOINTS) { _m.makeTranslation(p.x, p.y, p.z); joints.setMatrixAt(j, _m); joints.setColorAt(j, col); j++; }
     for (const c of conns) if (v + 2 <= MAX_BONES * 2) {
       const a = world[c.start], d = world[c.end];
       pos.set([a.x, a.y, a.z, d.x, d.y, d.z], v * 3); v += 2;
@@ -222,6 +224,7 @@ function updateHandViz(hands) {
   for (let s = hi; s < trails.length; s++) updateTrail(s, null); // fade out trails for absent hands
   for (let k = j; k < MAX_JOINTS; k++) joints.setMatrixAt(k, _hidden); // hide unused instances
   joints.instanceMatrix.needsUpdate = true;
+  if (joints.instanceColor) joints.instanceColor.needsUpdate = true;
   boneGeo.setDrawRange(0, v); boneGeo.attributes.position.needsUpdate = true;
 }
 hideHands();
@@ -338,9 +341,11 @@ function applyGestures(hands) {
   // A fist "parks" a hand — we ignore it — so you can drive one-hand gestures with your other
   // hand while both stay comfortably in frame (no yanking a hand out of view to change modes).
   // Two fists = pause everything. We classify each hand once, then act on the live ones only.
-  const active = hands.map(h => ({ h, pose: handPose(h) })).filter(a => a.pose !== 'fist');
+  const classified = hands.map(h => ({ h, pose: handPose(h) }));
+  const active = classified.filter(a => a.pose !== 'fist');
   const parked = hands.length - active.length;
   dragging = false;                                                        // set true only while rotating
+  poseEl.textContent = classified.map((a, i) => `H${i + 1} ${a.pose} ${pinchStrength(a.h).toFixed(2)}`).join('    ');
 
   if (active.length >= 2) {                                                  // two live hands
     const spread = twoHandSpread(active[0].h, active[1].h);
