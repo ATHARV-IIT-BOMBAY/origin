@@ -14,13 +14,14 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { HandLandmarker, FilesetResolver, DrawingUtils }
   from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18';
-import { handCenter, pinchStrength, twoHandSpread, landmarkToWorld, handPose, INDEX_TIP } from './gestures.js';
+import { handCenter, pinchStrength, twoHandSpread, twoHandAngle, landmarkToWorld, handPose, INDEX_TIP } from './gestures.js';
 
 // ---- Tuning knobs. A webcam is a messy sensor; these are the calibration dials. ----
-const ROT_SPEED = 6.0;    // how far a hand move rotates the model
-const ZOOM_SPEED = 6.0;   // how strongly two-hand spread scales the model
-const SMOOTH = 0.20;      // 0..1 low-pass ease; lower = smoother but laggier
-const MIRROR_X = -1;      // flip so moving your hand right rotates the model right
+// The first four are `let` because the on-screen calibration panel adjusts them live.
+let ROT_SPEED = 6.0;      // how far a hand move rotates the model
+let ZOOM_SPEED = 6.0;     // how strongly two-hand spread scales the model
+let SMOOTH = 0.20;        // 0..1 low-pass ease; lower = smoother but laggier
+let MIRROR_X = -1;        // flip so moving your hand right rotates the model right
 const SCALE_MIN = 0.3, SCALE_MAX = 4.0;
 const HAND_SPAN = 4.2;    // how wide the tracked hand maps into the 3D scene
 const HAND_DEPTH = 1.5;   // how strongly landmark depth pushes hand joints in/out
@@ -37,6 +38,17 @@ const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/w
 const $ = (id) => document.getElementById(id);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const video = $('video'), overlay = $('overlay'), stateEl = $('state'), errEl = $('err'), poseEl = $('pose');
+const modeEl = $('modePill'), recEl = $('rec');
+
+// ---------- HUD: live mode pill + stats readout ----------
+const MODE_LABEL = { rotate:'ROTATE', zoom:'ZOOM', explode:'EXPLODE', inspect:'INSPECT', park:'PARKED', pause:'PAUSED', idle:'IDLE' };
+function updateModePill(m) { if (modeEl) { modeEl.textContent = MODE_LABEL[m] || m.toUpperCase(); modeEl.className = 'pill ' + m; } }
+function updateStats(nHands) {
+  $('stHands').textContent = nHands;
+  $('stParts').textContent = parts.length;
+  $('stScale').textContent = Math.round(current.scale * 100) + '%';
+  $('stExpl').textContent = Math.round(current.explode * 100) + '%';
+}
 
 // ---------- Web Audio: tiny synth blips for gesture feedback (no audio files) ----------
 // A gesture is invisible until it "clicks" — a short tone on each mode change makes the
@@ -63,10 +75,11 @@ const SFX = {                       // sound played when we ENTER each mode (fir
   pause:   () => blip(150, 0.16, 'sine'),
 };
 let lastMode = '';
-function setMode(m) { if (m === lastMode) return; lastMode = m; (SFX[m] || null)?.(); }
+function setMode(m) { updateModePill(m); if (m === lastMode) return; lastMode = m; (SFX[m] || null)?.(); }
 
 // ---------- three.js scene ----------
-const renderer = new THREE.WebGLRenderer({ canvas: $('three'), antialias: true });
+// preserveDrawingBuffer lets the Snapshot button read the canvas back as a PNG.
+const renderer = new THREE.WebGLRenderer({ canvas: $('three'), antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0a0a0f);
@@ -110,6 +123,7 @@ function holoPart(geo, name, label, color = 0x0a2a4a, emissive = 0x0aa0ff) {
     metalness: 0.3, roughness: 0.35, transparent: true, opacity: 0.8 }));
   const wire = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
     color: 0x66e0ff, wireframe: true, transparent: true, opacity: 0.45 }));
+  core.userData.holoNative = true; wire.userData.holoWire = true;  // so applyHoloSkin leaves the rocket alone
   const g = new THREE.Group(); g.add(core, wire);
   g.name = name; g.userData = { label, core };
   return g;
@@ -163,6 +177,34 @@ function collectParts(root) {
   }
 }
 collectParts(model);
+
+// ---------- holographic skin: re-dress ANY uploaded model in the JARVIS look ----------
+// Uploaded models arrive with their own materials; this overrides every mesh with a translucent
+// emissive-blue material + a cyan wireframe overlay so it reads as a hologram like the built-in
+// rocket. Originals are cached so the toggle can restore them. The procedural rocket is marked
+// holoNative/holoWire and skipped (it's already holo). Default on — that's the whole aesthetic.
+let holoSkin = true, autoSpin = true;
+function applyHoloSkin(root, on) {
+  root.traverse(o => {
+    if (!o.isMesh || o.userData.holoNative || o.userData.holoWire) return;
+    if (on) {
+      if (!o.userData.origMat) o.userData.origMat = o.material;
+      if (!o.userData.holoMat) o.userData.holoMat = new THREE.MeshStandardMaterial({
+        color: 0x0a2a4a, emissive: 0x0aa0ff, emissiveIntensity: BASE_EMISSIVE,
+        metalness: 0.3, roughness: 0.35, transparent: true, opacity: 0.82 });
+      if (!o.userData.wire) {
+        const w = new THREE.Mesh(o.geometry, new THREE.MeshBasicMaterial({
+          color: 0x66e0ff, wireframe: true, transparent: true, opacity: 0.28 }));
+        w.userData.holoWire = true; w.raycast = () => {};   // never intercept point-to-inspect rays
+        o.add(w); o.userData.wire = w;
+      }
+      o.material = o.userData.holoMat; o.userData.wire.visible = true;
+    } else if (o.userData.origMat) {
+      o.material = o.userData.origMat;
+      if (o.userData.wire) o.userData.wire.visible = false;
+    }
+  });
+}
 
 // ---------- hand skeleton drawn INTO the 3D scene (your hand appears inside the hologram) ----------
 const MAX_JOINTS = 42;               // 2 hands * 21 landmarks
@@ -251,8 +293,9 @@ const LOADERS = {
 function swapModel(obj) {
   pivot.remove(model);
   model = obj; fitToView(model); pivot.add(model);
-  collectParts(model); clearHighlight();
-  target.explode = current.explode = 0; target.rx = target.ry = 0; spinVel.rx = spinVel.ry = 0;
+  collectParts(model); applyHoloSkin(model, holoSkin); clearHighlight();
+  target.explode = current.explode = 0; target.rx = target.ry = target.rz = 0; spinVel.rx = spinVel.ry = 0;
+  updateStats(0);   // refresh the parts count for the newly loaded model (live tracking re-fills hands next frame)
 }
 $('file').addEventListener('change', (e) => {
   const f = e.target.files[0]; if (!f) return;
@@ -272,10 +315,32 @@ $('file').addEventListener('change', (e) => {
   }, undefined, (err) => { URL.revokeObjectURL(url); errEl.textContent = 'Could not load model: ' + err; });
 });
 
+// ---------- HUD controls: holo skin · showcase toggles · snapshot · live calibration ----------
+$('tHolo').addEventListener('change', (e) => { holoSkin = e.target.checked; applyHoloSkin(model, holoSkin); });
+$('tSpin').addEventListener('change', (e) => { autoSpin = e.target.checked; });
+$('tBloom').addEventListener('change', (e) => { bloom.enabled = e.target.checked; });
+$('tGrid').addEventListener('change', (e) => { grid.visible = reticle.visible = e.target.checked; });
+$('snap').addEventListener('click', () => {                 // one-tap PNG of the holo render (preserveDrawingBuffer)
+  initAudio(); blip(900, 0.08, 'triangle');
+  const a = document.createElement('a');
+  a.download = 'holocontrol-' + Date.now() + '.png';
+  a.href = renderer.domElement.toDataURL('image/png'); a.click();
+});
+$('tuneBtn').addEventListener('click', () => { initAudio(); $('tune').classList.toggle('hidden'); });
+function bindRange(id, apply, outId, fmt) {                 // wire a slider to a live tuning variable
+  const el = $(id), out = $(outId);
+  const upd = () => { const v = parseFloat(el.value); apply(v); out.textContent = fmt(v); };
+  el.addEventListener('input', upd); upd();
+}
+bindRange('sRot', (v) => ROT_SPEED = v, 'vRot', (v) => v.toFixed(1));
+bindRange('sZoom', (v) => ZOOM_SPEED = v, 'vZoom', (v) => v.toFixed(1));
+bindRange('sSmooth', (v) => SMOOTH = v, 'vSmooth', (v) => v.toFixed(2));
+$('tMirror').addEventListener('change', (e) => { MIRROR_X = e.target.checked ? -1 : 1; });
+
 // ---------- transform state: gestures set `target`, each frame eases `current` toward it ----------
-const target = { rx: 0, ry: 0, scale: 1, explode: 0 };
-const current = { rx: 0, ry: 0, scale: 1, explode: 0 };
-$('reset').addEventListener('click', () => { initAudio(); blip(420, 0.12, 'sine'); target.rx = 0; target.ry = 0; target.scale = 1; target.explode = 0; spinVel.rx = spinVel.ry = 0; });
+const target = { rx: 0, ry: 0, rz: 0, scale: 1, explode: 0 };
+const current = { rx: 0, ry: 0, rz: 0, scale: 1, explode: 0 };
+$('reset').addEventListener('click', () => { initAudio(); blip(420, 0.12, 'sine'); target.rx = 0; target.ry = 0; target.rz = 0; target.scale = 1; target.explode = 0; spinVel.rx = spinVel.ry = 0; });
 
 // ---------- point-to-inspect: raycast from the camera through the index fingertip ----------
 // The fingertip is drawn into the scene at a fixed plane; a ray from the camera through it
@@ -312,7 +377,7 @@ function pointAt(hand) {                          // highlight+label the aimed p
 
 // ---------- MediaPipe hand tracking ----------
 let handLandmarker = null, drawUtils = null, running = false, lastVideoTime = -1;
-let prevCenter = null, prevSpread = null, idle = true;
+let prevCenter = null, prevSpread = null, prevAngle = null, idle = true;
 let dragging = false;                 // true while a pinch is actively rotating the model
 const spinVel = { rx: 0, ry: 0 };     // leftover angular velocity after you let go (flick-to-spin)
 
@@ -333,6 +398,7 @@ async function startCamera() {
     await video.play();
     overlay.width = video.videoWidth; overlay.height = video.videoHeight;
     running = true; stateEl.textContent = 'Show a hand';
+    if (recEl) { recEl.textContent = 'LIVE'; recEl.classList.add('on'); }
     const boot = $('boot');
     if (boot) { $('bootsub').textContent = 'HAND TRACKING ONLINE'; blip(600, 0.12, 'triangle'); setTimeout(() => boot.classList.add('hidden'), 900); }
   } catch (err) { errEl.textContent = 'Camera/model error: ' + err; }
@@ -351,15 +417,18 @@ function applyGestures(hands) {
 
   if (active.length >= 2) {                                                  // two live hands
     const spread = twoHandSpread(active[0].h, active[1].h);
+    const ang = twoHandAngle(active[0].h, active[1].h);                      // twist both hands (like a wheel) => roll
+    if (prevAngle != null) { let d = ang - prevAngle; d = Math.atan2(Math.sin(d), Math.cos(d)); target.rz += d * MIRROR_X; }
+    prevAngle = ang;                                                         // unwrapped so it never jumps at ±π
     prevCenter = null; idle = false; clearHighlight();
-    if (active[0].pose === 'pinch' && active[1].pose === 'pinch') {          // two pinches => zoom
+    if (active[0].pose === 'pinch' && active[1].pose === 'pinch') {          // two pinches => zoom (+ roll)
       if (prevSpread != null) target.scale = clamp(target.scale + (spread - prevSpread) * ZOOM_SPEED, SCALE_MIN, SCALE_MAX);
       prevSpread = spread;
-      stateEl.textContent = 'Zoom'; setMode('zoom');
-    } else {                                                                 // else => explode by gap
+      stateEl.textContent = 'Zoom + roll'; setMode('zoom');
+    } else {                                                                 // else => explode by gap (+ roll)
       target.explode = clamp((spread - EXPLODE_MIN) / (EXPLODE_MAX - EXPLODE_MIN), 0, 1);
       prevSpread = null;
-      stateEl.textContent = target.explode > 0.05 ? `Exploded ${Math.round(target.explode * 100)}%` : 'Spread hands to explode';
+      stateEl.textContent = target.explode > 0.05 ? `Exploded ${Math.round(target.explode * 100)}%` : 'Spread hands to explode · twist to roll';
       setMode('explode');
     }
   } else if (active.length === 1 && active[0].pose === 'pinch') {            // one pinch => rotate
@@ -371,20 +440,21 @@ function applyGestures(hands) {
       spinVel.ry = spinVel.ry * (1 - SPIN_CAPTURE) + dry * SPIN_CAPTURE;    // recent-weighted flick speed
       spinVel.rx = spinVel.rx * (1 - SPIN_CAPTURE) + drx * SPIN_CAPTURE;
     }
-    prevCenter = c; prevSpread = null; idle = false; dragging = true; clearHighlight();
+    prevCenter = c; prevSpread = null; prevAngle = null; idle = false; dragging = true; clearHighlight();
     stateEl.textContent = `Rotate (pinch ${pinchStrength(active[0].h).toFixed(2)})`; setMode('rotate');
   } else if (active.length === 1 && active[0].pose === 'point') {            // one point => inspect
-    prevCenter = null; prevSpread = null; idle = false;
+    prevCenter = null; prevSpread = null; prevAngle = null; idle = false;
     const name = pointAt(active[0].h);
     stateEl.textContent = name ? `▶ ${name}` : 'Point at a part'; setMode('inspect');
   } else {                                                                   // nothing live => drift
-    prevCenter = null; prevSpread = null; idle = true; clearHighlight();
+    prevCenter = null; prevSpread = null; prevAngle = null; idle = true; clearHighlight();
     stateEl.textContent = parked >= 2 ? '✊ paused'
       : parked ? '✊ parked — other hand is free'
       : hands.length ? 'Pinch = rotate · point = inspect · ✊ = park'
       : 'Show a hand';
     setMode(parked >= 2 ? 'pause' : parked ? 'park' : 'idle');
   }
+  updateStats(hands.length);
 }
 
 function drawHands(hands) {
@@ -409,15 +479,17 @@ function loop() {
     target.ry += spinVel.ry; target.rx += spinVel.rx;
     spinVel.ry *= SPIN_FRICTION; spinVel.rx *= SPIN_FRICTION;
     if (Math.hypot(spinVel.rx, spinVel.ry) < SPIN_MIN) spinVel.rx = spinVel.ry = 0;
-  } else if (idle) target.ry += IDLE_SPIN;         // gentle drift so the hologram feels alive
+  } else if (idle && autoSpin) target.ry += IDLE_SPIN;   // gentle turntable so the hologram feels alive
   current.rx += (target.rx - current.rx) * SMOOTH; // ease toward target every frame
   current.ry += (target.ry - current.ry) * SMOOTH;
+  current.rz += (target.rz - current.rz) * SMOOTH;
   current.scale += (target.scale - current.scale) * SMOOTH;
   current.explode += (target.explode - current.explode) * SMOOTH;
   for (const p of parts) p.position.copy(p.userData.home).multiplyScalar(1 + current.explode * EXPLODE_K);
-  pivot.rotation.set(current.rx, current.ry, 0);
+  pivot.rotation.set(current.rx, current.ry, current.rz);
   pivot.scale.setScalar(current.scale);
   for (const r of reticle.children) r.rotateOnWorldAxis(_up, 0.004 * r.userData.dir); // flat spin, projector look
   composer.render();
 }
+updateStats(0);   // seed the HUD readout (rocket = 6 parts) before the first frame
 loop();
