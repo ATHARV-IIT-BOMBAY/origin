@@ -333,6 +333,8 @@ async function startCamera() {
     await video.play();
     overlay.width = video.videoWidth; overlay.height = video.videoHeight;
     running = true; stateEl.textContent = 'Show a hand';
+    const boot = $('boot');
+    if (boot) { $('bootsub').textContent = 'HAND TRACKING ONLINE'; blip(600, 0.12, 'triangle'); setTimeout(() => boot.classList.add('hidden'), 900); }
   } catch (err) { errEl.textContent = 'Camera/model error: ' + err; }
 }
 $('start').addEventListener('click', startCamera);
