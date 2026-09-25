@@ -100,11 +100,12 @@ composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
 // Faint "holo-deck" grid so the model reads as floating in a space, not on a black void.
+const FLOOR_Y = -1.6;                 // baseline stage floor; the Ground slider moves the base from here
 const grid = new THREE.GridHelper(20, 40, 0x1e6fff, 0x0a2a4a);
-grid.position.y = -1.6; scene.add(grid);
+grid.position.y = FLOOR_Y; scene.add(grid);
 
 // Holo-projector base: two counter-rotating tech rings under the model (bloom makes them glow).
-const reticle = new THREE.Group(); reticle.position.y = -1.55; scene.add(reticle);
+const reticle = new THREE.Group(); reticle.position.y = FLOOR_Y + 0.05; scene.add(reticle);
 const _up = new THREE.Vector3(0, 1, 0);
 for (const [rIn, rOut, dir] of [[1.70, 1.86, 1], [1.96, 2.02, -1]]) {
   const ring = new THREE.Mesh(new THREE.RingGeometry(rIn, rOut, 96),
@@ -114,6 +115,9 @@ for (const [rIn, rOut, dir] of [[1.70, 1.86, 1], [1.96, 2.02, -1]]) {
 
 const pivot = new THREE.Group(); // we rotate/scale this; the model lives inside it
 scene.add(pivot);
+// Move the whole stage (floor grid + projector reticle) to a new base height and lift the model with
+// it, so the model's feet stay planted on the base wherever you set it. fitToView grounds to FLOOR_Y.
+function setGround(y) { grid.position.y = y; reticle.position.y = y + 0.05; pivot.position.y = y - FLOOR_Y; }
 
 // Hologram-styled part: translucent lit core + bright wireframe overlay (the bit that blooms).
 // Grouped so a whole part can be raycast, highlighted, and flown out as a single unit.
@@ -158,7 +162,7 @@ function fitToView(obj) { // drop any model centered on the stage with its feet 
   obj.position.set(0, 0, 0); obj.scale.setScalar(1); obj.rotation.set(0, 0, 0);
   obj.updateMatrixWorld(true);                       // measure the raw geometry extent, transform reset
   const box = new THREE.Box3().setFromObject(obj);
-  const t = fitTransform(box.min, box.max, 1.8, grid.position.y); // feet on the grid plane
+  const t = fitTransform(box.min, box.max, 1.8, FLOOR_Y); // feet on the baseline floor; Ground slider rides it up/down
   obj.scale.setScalar(t.scale);
   obj.position.set(t.position.x, t.position.y, t.position.z);
 }
@@ -186,6 +190,8 @@ collectParts(model);
 // rocket. Originals are cached so the toggle can restore them. The procedural rocket is marked
 // holoNative/holoWire and skipped (it's already holo). Default on — that's the whole aesthetic.
 let holoSkin = true, autoSpin = true;
+let lockX = false, lockY = false, lockZ = false; // freeze a rotation axis so the model spins cleanly around the free one(s)
+let offsetX = 0; // slide the model sideways off the projector center (scene units), set by the Move X slider
 function applyHoloSkin(root, on) {
   root.traverse(o => {
     if (!o.isMesh || o.userData.holoNative || o.userData.holoWire) return;
@@ -337,12 +343,17 @@ function bindRange(id, apply, outId, fmt) {                 // wire a slider to 
 bindRange('sRot', (v) => ROT_SPEED = v, 'vRot', (v) => v.toFixed(1));
 bindRange('sZoom', (v) => ZOOM_SPEED = v, 'vZoom', (v) => v.toFixed(1));
 bindRange('sSmooth', (v) => SMOOTH = v, 'vSmooth', (v) => v.toFixed(2));
+bindRange('sGround', (v) => setGround(v), 'vGround', (v) => v.toFixed(2));       // raise/lower the base the model stands on
+bindRange('sOffX', (v) => { offsetX = v; pivot.position.x = v; }, 'vOffX', (v) => v.toFixed(1)); // slide the model along X
+$('lockX').addEventListener('change', (e) => lockX = e.target.checked);          // freeze pitch, roll, or yaw for a clean turntable
+$('lockY').addEventListener('change', (e) => lockY = e.target.checked);
+$('lockZ').addEventListener('change', (e) => lockZ = e.target.checked);
 $('tMirror').addEventListener('change', (e) => { MIRROR_X = e.target.checked ? -1 : 1; });
 
 // ---------- transform state: gestures set `target`, each frame eases `current` toward it ----------
 const target = { rx: 0, ry: 0, rz: 0, scale: 1, explode: 0 };
 const current = { rx: 0, ry: 0, rz: 0, scale: 1, explode: 0 };
-$('reset').addEventListener('click', () => { initAudio(); blip(420, 0.12, 'sine'); target.rx = 0; target.ry = 0; target.rz = 0; target.scale = 1; target.explode = 0; spinVel.rx = spinVel.ry = 0; });
+$('reset').addEventListener('click', () => { initAudio(); blip(420, 0.12, 'sine'); target.rx = 0; target.ry = 0; target.rz = 0; target.scale = 1; target.explode = 0; spinVel.rx = spinVel.ry = 0; $('sOffX').value = 0; $('sOffX').dispatchEvent(new Event('input')); }); // recenter on X too (Ground stays: it's stage calibration)
 
 // ---------- point-to-inspect: raycast from the camera through the index fingertip ----------
 // The fingertip is drawn into the scene at a fixed plane; a ray from the camera through it
@@ -482,6 +493,9 @@ function loop() {
     spinVel.ry *= SPIN_FRICTION; spinVel.rx *= SPIN_FRICTION;
     if (Math.hypot(spinVel.rx, spinVel.ry) < SPIN_MIN) spinVel.rx = spinVel.ry = 0;
   } else if (idle && autoSpin) target.ry += IDLE_SPIN;   // gentle turntable so the hologram feels alive
+  if (lockX) target.rx = current.rx;   // held axes stop accumulating, so unlocking resumes smoothly (no snap)
+  if (lockY) target.ry = current.ry;
+  if (lockZ) target.rz = current.rz;
   current.rx += (target.rx - current.rx) * SMOOTH; // ease toward target every frame
   current.ry += (target.ry - current.ry) * SMOOTH;
   current.rz += (target.rz - current.rz) * SMOOTH;
