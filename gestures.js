@@ -66,23 +66,25 @@ export function rollDelta(prevAngle, ang, { zooming = false, deadzone = 0.012, m
   return (a > deadzone && a <= maxStep) ? d * mirror : 0;
 }
 
-// Part removal, pinch-free: "aim, hold, grab, pull, fling" as a pure state machine, so the timing is
-// testable against a fake clock instead of a webcam. Point at a part and HOLD it — a long dwell is the
-// whole safety, so a stray frame can't grab. Once the dwell fills the part sticks to your fingertip,
-// still on the plain point pose: no pinch anywhere, because forming the pinch was the exact motion the
-// tracker kept misreading as a grab. Move your hand and the part follows; fling it fast, or pull it
-// clear and let go, and it's removed; let go near home and it snaps back.
-//   phase:  'off' -> 'aim' (dwelling) -> 'grab' (stuck to the finger)
+// Part removal as a pure state machine, so the timing is testable against a fake clock, not a webcam.
+// Point at a part and HOLD it: for the first few seconds you're just INSPECTING it (info shows, part
+// glows blue). Hold past the dwell and it GRABS — the part turns red and sticks to your fingertip.
+// Then move your hand and the part follows, whatever the tracker thinks your pose is: this is the whole
+// fix for "it won't move" — MediaPipe's finger classification flickers off 'point' the instant the hand
+// moves, so requiring 'point' every frame dropped the grab the moment you tried to drag. We keep the
+// grab while a single controlling hand is present (`present`) and only end it two ways: drag the part
+// into the dustbin (`inBin`) -> removed; or let go — hand gone, fist, or a second hand — -> snaps home.
+//   phase:  'off' -> 'aim' (inspecting, dwell filling) -> 'grab' (stuck to the finger)
 //   action: one-shot edge for sound/HUD — null | 'grab' | 'remove' | 'drop'
-// `pose` is null when the hand leaves frame. `id` is the part being aimed at (null = nothing).
-// `pulled` = dragged past the eject distance; `fling` = moved fast enough to throw off. Either removes;
-// releasing (any pose but point, or the hand gone) short of the eject distance drops it home instead.
+// `pose` is null when the hand leaves frame; only a steady 'point' at a real `id` fills the dwell.
+// `present` = a single controlling hand is still here (defaults to "a hand is in frame"); `inBin` = the
+// grabbed part has been dragged into the dustbin. inBin removes; losing `present` drops it home.
 export const AIM_OFF = { phase: 'off', id: null, t0: 0, progress: 0, action: null };
-export function aimStep(st, { pose, id, now, pulled = false, fling = false }, { dwellMs = 1500 } = {}) {
-  if (st.phase === 'grab') {                                  // stuck to the finger: a fling or a release ends it
-    if (fling) return { ...AIM_OFF, id: st.id, action: 'remove' };
-    if (pose === 'point') return { ...st, action: null };    // still dragging it around
-    return { ...AIM_OFF, id: st.id, action: pulled ? 'remove' : 'drop' };
+export function aimStep(st, { pose, id, now, present = pose != null, inBin = false }, { dwellMs = 5000 } = {}) {
+  if (st.phase === 'grab') {                                  // stuck to the finger; pose may flicker as the hand moves
+    if (inBin) return { ...AIM_OFF, id: st.id, action: 'remove' };   // dragged into the dustbin
+    if (!present) return { ...AIM_OFF, id: st.id, action: 'drop' };  // hand gone / fist / two hands: snap it home
+    return { ...st, action: null };                          // otherwise keep following the finger, whatever the pose reads
   }
   if (pose !== 'point' || id == null) return AIM_OFF;         // hand gone, or not pointing at a part
   if (st.phase !== 'aim' || st.id !== id) return { phase: 'aim', id, t0: now, progress: 0, action: null };

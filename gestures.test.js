@@ -96,10 +96,10 @@ assert.equal(handPose(pinched), 'pinch', 'thumb+index together => pinch');
   assert.ok(Math.abs(world(min, 'y') - (-1.6)) < 1e-9, 'feet rest exactly on the floor');
 }
 
-// aimStep: the pinch-free part-removal machine, driven by a fake clock. The point of the long dwell is
-// that nothing gets grabbed by accident; the point of the rewrite is that no pinch is involved anywhere,
-// so the finger never has to change pose to grab or drag (forming the pinch was what the tracker kept
-// misreading). A fling (fast) or a pull-clear-then-release removes; a release near home just drops it.
+// aimStep: the pinch-free part machine, driven by a fake clock. A long dwell (info-then-grab) is the
+// whole safety so nothing grabs by accident. Once grabbed the part follows the finger regardless of what
+// pose the tracker reports frame to frame (the flicker bug); it ends only two ways: dragged into the bin
+// (removed), or the controlling hand goes away (dropped home). No pinch, no fling, no pull distance.
 {
   const O = { dwellMs: 600 };
   const step = (st, i) => aimStep(st, i, O);
@@ -109,27 +109,27 @@ assert.equal(handPose(pinched), 'pinch', 'thumb+index together => pinch');
   assert.equal(step(AIM_OFF, { pose: 'open',  id: 3, now: 0 }).phase, 'off', 'an open hand arms nothing');
   assert.equal(step(AIM_OFF, { pose: 'point', id: null, now: 0 }).phase, 'off', 'pointing at empty space arms nothing');
 
-  // point at part 3 and hold: the dwell fills, then the part grabs onto the finger — no pinch needed
+  // point at part 3 and hold: the dwell fills (this is the "info" window), then the part grabs — no pinch
   let s = step(AIM_OFF, { pose: 'point', id: 3, now: 1000 });
-  assert.equal(s.phase, 'aim', 'pointing at a part starts the dwell');
+  assert.equal(s.phase, 'aim', 'pointing at a part starts the dwell (info showing)');
   s = step(s, { pose: 'point', id: 3, now: 1300 });
-  assert.ok(s.phase === 'aim' && Math.abs(s.progress - 0.5) < 1e-9, 'half-way through the dwell, still only aiming');
+  assert.ok(s.phase === 'aim' && Math.abs(s.progress - 0.5) < 1e-9, 'half-way through the dwell, still only inspecting');
   s = step(s, { pose: 'point', id: 3, now: 1600 });
   assert.ok(s.phase === 'grab' && s.action === 'grab' && s.id === 3, 'a full dwell grabs the part onto the finger, firing once');
 
-  // dragging: keep pointing and it stays grabbed (following the finger); a slow pull-out must NOT remove
+  // dragging: the grab MUST survive the tracker flickering off 'point' as the hand moves — the old bug.
   const held = step(s, { pose: 'point', id: 3, now: 1700 });
-  assert.ok(held.phase === 'grab' && held.action === null, 'holding the point keeps dragging it — no repeat action');
-  assert.equal(step(held, { pose: 'point', id: 3, now: 2000, pulled: true }).phase, 'grab', 'a slow pull-out only repositions — it does not auto-remove');
+  assert.ok(held.phase === 'grab' && held.action === null, 'holding keeps dragging it — no repeat action');
+  assert.equal(step(held, { pose: 'open',  id: null, now: 1800, present: true }).phase, 'grab', "pose flickering to 'open' mid-drag does NOT drop the grab");
+  assert.equal(step(held, { pose: null,    id: null, now: 1800, present: true }).phase, 'grab', 'a dropped pose reading (hand still there) does NOT drop the grab');
 
-  // removal, three ways in: a fast fling, pulling it clear then letting go, or yanking off-frame while clear
-  assert.equal(step(held, { pose: 'point', id: 3, now: 1800, fling: true }).action, 'remove', 'a fast fling throws it off even mid-point');
-  const out = step(held, { pose: 'open', id: null, now: 2000, pulled: true });
-  assert.ok(out.action === 'remove' && out.id === 3 && out.phase === 'off', 'releasing a pulled-clear part removes it');
-  assert.equal(step(held, { pose: null, id: null, now: 2000, pulled: true }).action, 'remove', 'yanking the hand off-frame while clear still removes');
+  // removal is ONLY the dustbin: drag the part in => removed, firing once
+  const binned = step(held, { pose: 'point', id: 3, now: 1900, present: true, inBin: true });
+  assert.ok(binned.action === 'remove' && binned.id === 3 && binned.phase === 'off', 'dragging the part into the bin removes it');
 
-  // ...but a release short of the eject distance just snaps it home
-  assert.equal(step(held, { pose: 'open', id: null, now: 2000, pulled: false }).action, 'drop', 'letting go near home drops it back, not removed');
+  // letting go WITHOUT the bin snaps it home: the controlling hand leaving (gone / fist / two hands) => drop
+  assert.equal(step(held, { pose: null, id: null, now: 2000, present: false }).action, 'drop', 'losing the controlling hand drops it back home, not removed');
+  assert.ok(step(held, { pose: null, id: null, now: 2000, present: false }).phase === 'off', 'and the machine resets');
 
   // escape hatches during the dwell: aim elsewhere restarts it, dropping the point abandons it
   assert.ok(step(step(AIM_OFF, { pose: 'point', id: 3, now: 0 }), { pose: 'point', id: 7, now: 100 }).id === 7, 'aiming at a different part restarts the dwell there');

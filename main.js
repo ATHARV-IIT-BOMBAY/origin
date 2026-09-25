@@ -33,15 +33,15 @@ const EXPLODE_K = 1.6;                        // full-explosion expansion: parts
 const EXPLODE_MIN = 0.20, EXPLODE_MAX = 0.75; // two-hand spread range mapped onto 0..1 explosion
 const TWIST_DEADZONE = 0.012;                 // rad/frame of two-hand twist to ignore as jitter, so a zoom/hold doesn't drift into roll
 const BASE_EMISSIVE = 0.6, HIGHLIGHT_EMISSIVE = 2.4; // part glow: resting vs. aimed-at
-// Part removal, pinch-free ("aim, hold, grab, pull, fling"). GRAB_DWELL is the whole safety: pointing
-// at one part this long is a deliberate act, a stray frame isn't — so no pinch is needed to commit,
-// which is what used to break (bringing the thumb in to pinch got misread as the grab, mid-motion).
-// Once grabbed the part follows the fingertip 1:1 in the model's own space; PULL_EJECT is how far (in
-// those units) counts as "pulled clear", and FLING_SPEED how fast a flick (per-frame fingertip travel)
-// throws it straight off.
-const GRAB_DWELL_MS = 1500;         // ponytail: 1.5s feels deliberate but not tedious; bump to 3000 for a longer hold
-const PULL_EJECT = 0.85, FLING_SPEED = 0.5;   // ponytail: FLING_SPEED is camera/framerate-dependent — tune on real hardware
-const EJECT_SPEED = 0.06;   // fade-and-fly-out per frame (~0.3s at 60fps)
+// Part removal, pinch-free. Point at a part and HOLD: for GRAB_DWELL_MS you're inspecting it (info card,
+// blue glow); hold past that and it grabs onto the fingertip (turns red) and follows your hand 1:1 in the
+// model's own space. No pinch, and the grab survives the tracker's pose flickering as you move (that
+// flicker dropping the grab was the "it won't move" bug). Removal is the DUSTBIN: drag the grabbed part
+// into the bin and it dissolves; let go anywhere else (hand gone / fist / two hands) and it snaps home.
+const GRAB_DWELL_MS = 5000;         // ponytail: the 5s "inspect then grab" hold the user asked for; tune here if it feels long
+const HL_INFO = 0x2ad0ff, HL_GRAB = 0xff2a2a;  // emissive tint: blue while inspecting, red once it's grabbed and moveable
+const BIN_RADIUS = 0.75;            // ponytail: world-space reach to drop a part into the bin — tune with the bin position on real hardware
+const EJECT_SPEED = 0.055;  // dissolve speed per frame (~0.3s at 60fps)
 const GHOST_FACTOR = 0.16;  // the rest of the model dims to this fraction of its opacity while a part is grabbed
 const CUT_SMOOTH = 0.15;    // ease on the section plane — MediaPipe's landmark depth is noisy, and an unsmoothed plane strobes
 const CUT_PARKED = 1e6;     // plane constant that puts the cut so far away nothing is clipped (see clipPlane)
@@ -135,6 +135,28 @@ for (const [rIn, rOut, dir] of [[1.70, 1.86, 1], [1.96, 2.02, -1]]) {
 
 const pivot = new THREE.Group(); // we rotate/scale this; the model lives inside it
 scene.add(pivot);
+
+// ---------- dustbin: drag a grabbed part into this to remove it ----------
+// Lives in SCENE space, not inside pivot, so it stays put on the stage while the model spins. Hidden
+// (faded out) until a part is grabbed, then it rises in beside the stage; drag the grabbed part within
+// BIN_RADIUS of it and the part dissolves. An open can (body + rim + base) in a red holo skin, with a
+// wire overlay to match the model's look. Never intercepts the aim ray (all meshes raycast to nothing).
+const bin = new THREE.Group(); bin.visible = false; scene.add(bin);
+let binShow = false;   // target visibility; the loop eases the bin's opacity toward it
+{
+  const skin = new THREE.MeshStandardMaterial({ color: 0x2a0808, emissive: 0xff3018, emissiveIntensity: 0.6,
+    metalness: 0.3, roughness: 0.4, transparent: true, opacity: 0, side: THREE.DoubleSide });
+  const wireMat = new THREE.MeshBasicMaterial({ color: 0xff7a60, wireframe: true, transparent: true, opacity: 0 });
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.44, 0.34, 0.82, 28, 1, true), skin);
+  const rim  = new THREE.Mesh(new THREE.TorusGeometry(0.44, 0.045, 10, 28), skin); rim.rotation.x = Math.PI / 2; rim.position.y = 0.41;
+  const base = new THREE.Mesh(new THREE.CircleGeometry(0.34, 28), skin); base.rotation.x = -Math.PI / 2; base.position.y = -0.41;
+  const wire = new THREE.Mesh(new THREE.CylinderGeometry(0.44, 0.34, 0.82, 14, 3, true), wireMat);
+  for (const m of [body, rim, base, wire]) { m.raycast = () => {}; bin.add(m); }
+  bin.userData.mats = [skin, wireMat];
+}
+bin.position.set(1.7, FLOOR_Y + 0.45, 0.9);   // ponytail: front-right of the stage, within a hand's drag reach — tune with BIN_RADIUS
+function showBin(on) { binShow = on; }
+
 // Move the whole stage (floor grid + projector reticle) to a new base height and lift the model with
 // it, so the model's feet stay planted on the base wherever you set it. fitToView grounds to FLOOR_Y.
 function setGround(y) { grid.position.y = y; reticle.position.y = y + 0.05; pivot.position.y = y - FLOOR_Y; }
@@ -176,7 +198,7 @@ function setSection(on) {
   sectionOn = on;
   cutViz.visible = on;
   if (!on) clipPlane.constant = CUT_PARKED;   // park it rather than drop it: see the note above
-  else { aim = AIM_OFF; locked = null; grabTip = null; ghostOthers(null); clearHighlight(); }
+  else { aim = AIM_OFF; locked = null; grabTip = null; binShow = false; ghostOthers(null); clearHighlight(); }
   $('secBtn').classList.toggle('on', on);
   initAudio(); blip(on ? 880 : 300, 0.09, 'square', 0.04);
 }
@@ -271,6 +293,10 @@ function collectParts(root) {
     p.userData.pdir = p.userData.dir.lengthSq() > 1e-8 ? p.userData.dir : new THREE.Vector3(0, 0, span * 0.35);
     if (!p.userData.core) p.userData.core = firstMesh(p);
     if (p.userData.label == null) p.userData.label = p.name || 'Part';
+    // "What it does" for an auto-detected mesh: the mesh data carries no function, only a name and a
+    // position in the assembly. So the honest info card is the part's own name (often meaningful —
+    // "wheel", "piston" — for a well-authored model) plus which component it is. ponytail: no fake specs.
+    p.userData.info = `component ${i + 1} of ${parts.length}`;
   });
   applyClip(root);   // every material has to carry the section plane, or half the model ignores the cut
 }
@@ -411,7 +437,7 @@ function swapModel(obj) {
   clearHighlight();                 // before the dispose: the highlight holds a material from the OLD model
   // Drop the removal state rather than restoring it — these parts belong to the model being thrown
   // away, and `pid` indices into the new `parts` array would point at whatever now sits there.
-  removed.length = 0; ejecting.length = 0; aim = AIM_OFF; locked = null; grabTip = null;
+  removed.length = 0; ejecting.length = 0; aim = AIM_OFF; locked = null; grabTip = null; binShow = false;
   pivot.remove(model); disposeTree(model);
   model = obj; fitToView(model); pivot.add(model);
   collectParts(model); applyHoloSkin(model, holoSkin);
@@ -524,35 +550,47 @@ addEventListener('keydown', (e) => {
 const labelEl = $('label');
 const raycaster = new THREE.Raycaster();
 const _tip = new THREE.Vector3(), _proj = new THREE.Vector3();
-const _tipW = new THREE.Vector3(), _tipPrev = new THREE.Vector3(), _d = new THREE.Vector3();  // grabbed-part fingertip tracking (pivot-local)
+const _tipW = new THREE.Vector3(), _d = new THREE.Vector3(), _binW = new THREE.Vector3();  // grabbed-part fingertip tracking (pivot-local) + bin proximity (world)
 let highlighted = null;
 function findPart(obj) { while (obj) { if (partSet.has(obj)) return obj; obj = obj.parent; } return null; }
-function setHighlight(part) {
-  if (highlighted && highlighted !== part) {
-    const m = highlighted.userData.core?.material;
-    if (m && 'emissiveIntensity' in m) m.emissiveIntensity = BASE_EMISSIVE;
-  }
-  highlighted = part;
+// Highlight = re-tint the part's emissive: blue (HL_INFO) while you inspect it, red (HL_GRAB) once it's
+// grabbed. The original emissive is cached per material the first time we touch it, so clearing restores
+// the holo skin exactly. Guarded on `m.emissive` so a skinned-off model with a flat material won't throw.
+function tint(part, hex, intensity) {
   const m = part?.userData.core?.material;
-  if (m && 'emissiveIntensity' in m) m.emissiveIntensity = HIGHLIGHT_EMISSIVE;
+  if (!m || !m.emissive) return;
+  if (m.userData.emissive0 == null) m.userData.emissive0 = m.emissive.getHex();
+  m.emissive.setHex(hex); m.emissiveIntensity = intensity;
 }
-function clearHighlight() { setHighlight(null); labelEl.style.opacity = '0'; }
-function pointAt(hand) {                          // highlight+label the aimed part; returns the part or null
+function restoreEmissive(part) {
+  const m = part?.userData.core?.material;
+  if (m && m.emissive && m.userData.emissive0 != null) { m.emissive.setHex(m.userData.emissive0); m.emissiveIntensity = BASE_EMISSIVE; }
+}
+function setHighlight(part, hex = HL_INFO) {
+  if (highlighted && highlighted !== part) restoreEmissive(highlighted);
+  highlighted = part;
+  tint(part, hex, HIGHLIGHT_EMISSIVE);
+}
+function clearHighlight() { if (highlighted) restoreEmissive(highlighted); highlighted = null; labelEl.style.opacity = '0'; }
+function pointAt(hand, stickyId = null) {         // highlight+label the aimed part (blue); returns the part or null
   const w = landmarkToWorld(hand[INDEX_TIP], HAND_SPAN, HAND_DEPTH);
   raycaster.set(camera.position, _tip.set(w.x, w.y, w.z).sub(camera.position).normalize());
   // Walk the hits rather than taking the first: three.js raycasts invisible geometry happily, so
-  // without this the ray would keep "hitting" parts you already removed and aiming would go dead
-  // in the holes you'd just made.
+  // without this the ray would keep "hitting" parts you already removed. And prefer the sticky target
+  // (the part we're already dwelling on) if the ray still touches it at all, so a 5s hold survives the
+  // ray jittering onto a neighbour for a frame — otherwise the dwell would keep resetting near the end.
   let part = null, hit = null;
   for (const h of raycaster.intersectObject(pivot, true)) {
     const p = findPart(h.object);
-    if (p && p.visible) { part = p; hit = h; break; }
+    if (!p || !p.visible) continue;
+    if (!part) { part = p; hit = h; }
+    if (stickyId != null && p.userData.pid === stickyId) { part = p; hit = h; break; }
   }
   setHighlight(part);
   if (!part) { labelEl.style.opacity = '0'; return null; }
   _proj.copy(hit.point).project(camera);
   const x = (_proj.x * 0.5 + 0.5) * innerWidth, y = (-_proj.y * 0.5 + 0.5) * innerHeight;
-  labelEl.textContent = part.userData.label;
+  labelEl.innerHTML = `${part.userData.label}<span class="lsub">${part.userData.info}</span>`;   // name + honest info card, floated at the part
   labelEl.style.transform = `translate(-50%,-150%) translate(${x}px,${y}px)`;
   labelEl.style.opacity = '1';
   return part;
@@ -574,15 +612,15 @@ function setPartOpacity(part, f) {
   });
 }
 function ghostOthers(keep) { for (const p of parts) setPartOpacity(p, keep && p !== keep ? GHOST_FACTOR : 1); }
-function ejectPart(p) {                     // pulled clear and released: fly out, dissolve, book it as removed
+function sinkPart(p) {                       // dropped in the dustbin: dissolve in place, book it as removed
   if (!p || removed.includes(p)) return;
-  ejecting.push({ p, t: 0, pull0: p.userData.pull });
-  blip(140, 0.22, 'sawtooth', 0.07); setTimeout(() => blip(90, 0.3, 'sine', 0.05), 60);
+  ejecting.push({ p, t: 0, pull0: p.userData.pull, sink: true });
+  blip(150, 0.2, 'sawtooth', 0.06); setTimeout(() => blip(80, 0.28, 'sine', 0.05), 60);
 }
 function restoreParts() {                   // put the whole assembly back (nothing is destroyed, only hidden)
   for (const p of [...removed, ...ejecting.map(e => e.p)]) { p.visible = true; p.userData.pull = p.userData.pullT = 0; setPartOpacity(p, 1); }
   removed.length = 0; ejecting.length = 0;
-  aim = AIM_OFF; locked = null; grabTip = null;
+  aim = AIM_OFF; locked = null; grabTip = null; binShow = false; clearHighlight();
   updateStats();
 }
 $('restore').addEventListener('click', () => { initAudio(); blip(560, 0.1, 'triangle'); setTimeout(() => blip(840, 0.12, 'triangle'), 80); restoreParts(); });
@@ -657,23 +695,23 @@ function applyGestures(hands) {
   // the hand leaves frame mid-pull. Only raycast while the machine is still choosing a target.
   const tip = solo ? landmarkToWorld(solo.h[INDEX_TIP], HAND_SPAN, HAND_DEPTH) : null;
   if (tip) { _tipW.set(tip.x, tip.y, tip.z); pivot.worldToLocal(_tipW); }     // fingertip in the model's own space
-  const aimedPart = solo && solo.pose === 'point' && (aim.phase === 'off' || aim.phase === 'aim') ? pointAt(solo.h) : null;
-  let drag = 0, speed = 0;
-  if (aim.phase === 'grab' && locked && tip && grabTip) {                     // grabbed: the part follows the fingertip
+  const stickyId = aim.phase === 'aim' ? aim.id : null;                       // keep the dwell locked to the part we started on
+  const aimedPart = solo && solo.pose === 'point' && aim.phase !== 'grab' ? pointAt(solo.h, stickyId) : null;
+  let inBin = false;
+  if (aim.phase === 'grab' && locked && tip && grabTip) {                     // grabbed: the part rides the fingertip 1:1
     _d.copy(_tipW).sub(grabTip);                                             // how far the finger has travelled since the grab
-    drag = _d.length();
-    speed = _tipW.distanceTo(_tipPrev);                                      // per-frame travel = flick speed
-    if (drag > 1e-4) { locked.userData.pdir.copy(_d).normalize(); locked.userData.pullT = drag; }  // move left => part goes left
-    _tipPrev.copy(_tipW);
+    if (_d.lengthSq() > 1e-8) { locked.userData.pdir.copy(_d).normalize(); locked.userData.pullT = _d.length(); }  // move left => part goes left
+    // is the part now inside the dustbin? test in WORLD space (the bin doesn't rotate with the model)
+    _binW.copy(locked.userData.home).addScaledVector(locked.userData.dir, current.explode * EXPLODE_K).addScaledVector(locked.userData.pdir, locked.userData.pull);
+    inBin = pivot.localToWorld(_binW).distanceTo(bin.position) < BIN_RADIUS;
   }
   aim = aimStep(aim, { pose: solo?.pose ?? null, id: aimedPart?.userData.pid ?? null, now: performance.now(),
-                       pulled: drag > PULL_EJECT, fling: speed > FLING_SPEED && drag > 0.3 },
-                { dwellMs: GRAB_DWELL_MS });
-  if (aim.action === 'grab') { locked = parts[aim.id]; setHighlight(locked); ghostOthers(locked); grabTip = _tipW.clone(); _tipPrev.copy(_tipW); }
-  else if (aim.action) {                                                     // 'remove' or 'drop': the finger let go (or flung)
-    if (aim.action === 'remove') ejectPart(locked);
-    else if (locked) locked.userData.pullT = 0;                            // short of the threshold: eases back home
-    locked = null; grabTip = null; ghostOthers(null);
+                       present: !!solo, inBin }, { dwellMs: GRAB_DWELL_MS });
+  if (aim.action === 'grab') { locked = parts[aim.id]; setHighlight(locked, HL_GRAB); ghostOthers(locked); grabTip = _tipW.clone(); showBin(true); }
+  else if (aim.action) {                                                     // 'remove' (binned) or 'drop' (let go)
+    if (aim.action === 'remove') sinkPart(locked);
+    else if (locked) locked.userData.pullT = 0;                            // dropped: eases back home
+    locked = null; grabTip = null; ghostOthers(null); showBin(false); clearHighlight();
   }
 
   if (active.length >= 2) {                                                  // two live hands
@@ -696,16 +734,16 @@ function applyGestures(hands) {
       stateEl.textContent = target.explode > 0.05 ? `Exploded ${Math.round(target.explode * 100)}%` : 'Spread to explode · twist to roll';
       setMode('explode');
     }
-  } else if (aim.phase === 'grab') {                                         // part is riding the fingertip (pullT already set above)
+  } else if (aim.phase === 'grab') {                                         // part is riding the fingertip (pullT set above)
     prevCenter = null; prevSpread = null; prevAngle = null; idle = false;
-    setHighlight(locked);
-    stateEl.textContent = drag > PULL_EJECT
-      ? `✂ fling it, or open your hand — ${locked?.userData.label}`
-      : `✊ ${locked?.userData.label} — move to pull it out  ${bar(drag / PULL_EJECT)}`;
+    setHighlight(locked, HL_GRAB); labelEl.style.opacity = '0';             // info card was for inspecting; the HUD line drives the grab
+    stateEl.textContent = inBin
+      ? `🗑 drop it — ${locked?.userData.label} over the bin`
+      : `✊ ${locked?.userData.label} follows your finger — carry it to the 🗑 to remove`;
     setMode('grab');
-  } else if (aim.phase === 'aim') {                                          // dwelling on a part
+  } else if (aim.phase === 'aim') {                                          // inspecting: info card showing, dwell filling
     prevCenter = null; prevSpread = null; prevAngle = null; idle = false;
-    stateEl.textContent = `▶ ${aimedPart?.userData.label}  ${bar(aim.progress)} hold to grab`;
+    stateEl.textContent = `ℹ ${aimedPart?.userData.label} · ${aimedPart?.userData.info}  ${bar(aim.progress)} hold to grab`;
     setMode('inspect');
   } else if (solo && solo.pose === 'pinch') {                                // one pinch => rotate
     const c = soloC;
@@ -719,7 +757,7 @@ function applyGestures(hands) {
     prevCenter = c; prevSpread = null; prevAngle = null; idle = false; dragging = true; clearHighlight();
     stateEl.textContent = `Rotate (pinch ${pinchStrength(solo.h).toFixed(2)})`; setMode('rotate');
   } else if (solo && solo.pose === 'point') {                                // pointing at empty space
-    prevCenter = null; prevSpread = null; prevAngle = null; idle = false;
+    prevCenter = null; prevSpread = null; prevAngle = null; idle = false; clearHighlight();
     stateEl.textContent = 'Point at a part'; setMode('inspect');
   } else {                                                                   // nothing live => drift
     prevCenter = null; prevSpread = null; prevAngle = null; idle = true; clearHighlight();
@@ -769,7 +807,7 @@ function loop() {
   for (let i = ejecting.length - 1; i >= 0; i--) {
     const e = ejecting[i];
     e.t += EJECT_SPEED;
-    e.p.userData.pullT = e.pull0 + e.t * 1.5;
+    if (!e.sink) e.p.userData.pullT = e.pull0 + e.t * 1.5;   // bin removals dissolve in place; this is the legacy fly-out
     setPartOpacity(e.p, Math.max(0, 1 - e.t));
     if (e.t >= 1) { e.p.visible = false; e.p.userData.pull = e.p.userData.pullT = 0; ejecting.splice(i, 1); removed.push(e.p); updateStats(); }
   }
@@ -782,6 +820,11 @@ function loop() {
   pivot.rotation.set(current.rx, current.ry, current.rz);
   pivot.scale.setScalar(current.scale);
   for (const r of reticle.children) r.rotateOnWorldAxis(_up, 0.004 * r.userData.dir); // flat spin, projector look
+  if (binShow || bin.visible) {   // dustbin eases in while a part is grabbed, out otherwise; slow spin so it reads as live
+    const [skin, wireMat] = bin.userData.mats;
+    skin.opacity += ((binShow ? 0.9 : 0) - skin.opacity) * 0.15;
+    wireMat.opacity = skin.opacity * 0.55; bin.visible = skin.opacity > 0.02; bin.rotation.y += 0.012;
+  }
   composer.render();
 }
 updateStats(0);   // seed the HUD readout (rocket = 7 parts) before the first frame
