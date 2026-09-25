@@ -33,14 +33,16 @@ const EXPLODE_K = 1.6;                        // full-explosion expansion: parts
 const EXPLODE_MIN = 0.20, EXPLODE_MAX = 0.75; // two-hand spread range mapped onto 0..1 explosion
 const TWIST_DEADZONE = 0.012;                 // rad/frame of two-hand twist to ignore as jitter, so a zoom/hold doesn't drift into roll
 const BASE_EMISSIVE = 0.6, HIGHLIGHT_EMISSIVE = 2.4; // part glow: resting vs. aimed-at
-// Part removal ("aim, hold, grab, pull, release"). DWELL is the safety: pointing at a part for this
-// long is a deliberate act, a stray frame isn't. PULL_GAIN converts hand travel (normalized image
-// units, so ~0.5 is a big arm move) into how far the part slides out, measured in its own explode-
-// direction lengths — scale-invariant, same trick as EXPLODE_K. Release past PULL_EJECT and it goes.
-const DWELL_MS = 600, LOCK_HOLD_MS = 2500;
-const PULL_GAIN = 4.0, PULL_EJECT = 0.85;
+// Part removal, pinch-free ("aim, hold, grab, pull, fling"). GRAB_DWELL is the whole safety: pointing
+// at one part this long is a deliberate act, a stray frame isn't — so no pinch is needed to commit,
+// which is what used to break (bringing the thumb in to pinch got misread as the grab, mid-motion).
+// Once grabbed the part follows the fingertip 1:1 in the model's own space; PULL_EJECT is how far (in
+// those units) counts as "pulled clear", and FLING_SPEED how fast a flick (per-frame fingertip travel)
+// throws it straight off.
+const GRAB_DWELL_MS = 1500;         // ponytail: 1.5s feels deliberate but not tedious; bump to 3000 for a longer hold
+const PULL_EJECT = 0.85, FLING_SPEED = 0.5;   // ponytail: FLING_SPEED is camera/framerate-dependent — tune on real hardware
 const EJECT_SPEED = 0.06;   // fade-and-fly-out per frame (~0.3s at 60fps)
-const GHOST_FACTOR = 0.16;  // the rest of the model dims to this fraction of its opacity while a part is locked
+const GHOST_FACTOR = 0.16;  // the rest of the model dims to this fraction of its opacity while a part is grabbed
 const CUT_SMOOTH = 0.15;    // ease on the section plane — MediaPipe's landmark depth is noisy, and an unsmoothed plane strobes
 const CUT_PARKED = 1e6;     // plane constant that puts the cut so far away nothing is clipped (see clipPlane)
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
@@ -86,8 +88,7 @@ const SFX = {                       // sound played when we ENTER each mode (fir
   zoom:    () => blip(760, 0.09, 'triangle'),
   explode: () => blip(300, 0.12, 'sawtooth', 0.05),
   inspect: () => blip(880, 0.05, 'square', 0.03),
-  lock:    () => { blip(1180, 0.06, 'square', 0.04); setTimeout(() => blip(1480, 0.10, 'square', 0.05), 70); }, // two-tone target lock
-  grab:    () => blip(240, 0.10, 'sawtooth', 0.06),
+  grab:    () => { blip(1180, 0.06, 'square', 0.04); setTimeout(() => blip(1480, 0.10, 'square', 0.05), 70); }, // two-tone: part grabbed onto the finger
   section: () => { blip(420, 0.05, 'square', 0.03); setTimeout(() => blip(1050, 0.16, 'sine', 0.04), 50); }, // a "slice"
   park:    () => blip(200, 0.10, 'sine'),
   pause:   () => blip(150, 0.16, 'sine'),
@@ -175,7 +176,7 @@ function setSection(on) {
   sectionOn = on;
   cutViz.visible = on;
   if (!on) clipPlane.constant = CUT_PARKED;   // park it rather than drop it: see the note above
-  else { aim = AIM_OFF; locked = null; grabOrigin = null; ghostOthers(null); clearHighlight(); }
+  else { aim = AIM_OFF; locked = null; grabTip = null; ghostOthers(null); clearHighlight(); }
   $('secBtn').classList.toggle('on', on);
   initAudio(); blip(on ? 880 : 300, 0.09, 'square', 0.04);
 }
@@ -410,7 +411,7 @@ function swapModel(obj) {
   clearHighlight();                 // before the dispose: the highlight holds a material from the OLD model
   // Drop the removal state rather than restoring it — these parts belong to the model being thrown
   // away, and `pid` indices into the new `parts` array would point at whatever now sits there.
-  removed.length = 0; ejecting.length = 0; aim = AIM_OFF; locked = null; grabOrigin = null;
+  removed.length = 0; ejecting.length = 0; aim = AIM_OFF; locked = null; grabTip = null;
   pivot.remove(model); disposeTree(model);
   model = obj; fitToView(model); pivot.add(model);
   collectParts(model); applyHoloSkin(model, holoSkin);
@@ -523,6 +524,7 @@ addEventListener('keydown', (e) => {
 const labelEl = $('label');
 const raycaster = new THREE.Raycaster();
 const _tip = new THREE.Vector3(), _proj = new THREE.Vector3();
+const _tipW = new THREE.Vector3(), _tipPrev = new THREE.Vector3(), _d = new THREE.Vector3();  // grabbed-part fingertip tracking (pivot-local)
 let highlighted = null;
 function findPart(obj) { while (obj) { if (partSet.has(obj)) return obj; obj = obj.parent; } return null; }
 function setHighlight(part) {
@@ -580,7 +582,7 @@ function ejectPart(p) {                     // pulled clear and released: fly ou
 function restoreParts() {                   // put the whole assembly back (nothing is destroyed, only hidden)
   for (const p of [...removed, ...ejecting.map(e => e.p)]) { p.visible = true; p.userData.pull = p.userData.pullT = 0; setPartOpacity(p, 1); }
   removed.length = 0; ejecting.length = 0;
-  aim = AIM_OFF; locked = null; grabOrigin = null;
+  aim = AIM_OFF; locked = null; grabTip = null;
   updateStats();
 }
 $('restore').addEventListener('click', () => { initAudio(); blip(560, 0.1, 'triangle'); setTimeout(() => blip(840, 0.12, 'triangle'), 80); restoreParts(); });
@@ -588,7 +590,7 @@ $('restore').addEventListener('click', () => { initAudio(); blip(560, 0.1, 'tria
 // ---------- MediaPipe hand tracking ----------
 let handLandmarker = null, drawUtils = null, running = false, lastVideoTime = -1;
 let prevCenter = null, prevSpread = null, prevAngle = null, idle = true;
-let aim = AIM_OFF, locked = null, grabOrigin = null;   // part-removal machine: state, the locked part, where the pull started
+let aim = AIM_OFF, locked = null, grabTip = null;   // part-removal machine: state, the grabbed part, and the fingertip pos (pivot-local) where the grab began
 let dragging = false;                 // true while a pinch is actively rotating the model
 const spinVel = { rx: 0, ry: 0 };     // leftover angular velocity after you let go (flick-to-spin)
 
@@ -647,22 +649,31 @@ function applyGestures(hands) {
     return;
   }
 
-  // ---- Part removal, stepped every frame BEFORE anything else can claim the hand. Point at a part
-  // to start a dwell, hold it to lock on, then pinch — with a part locked the pinch pulls THAT PART
-  // out instead of rotating the model, and letting go past the threshold dissolves it. Stepping
-  // unconditionally is what makes releases land: a hand that leaves frame mid-pull still resolves.
-  // Only raycast while the machine is still choosing a target, or the lock would drift to whatever
-  // the finger happens to cross on the way to a pinch.
+  // ---- Part removal, pinch-free, stepped every frame BEFORE anything else can claim the hand. Point at
+  // a part and hold to grab it onto your fingertip (a long dwell, so a stray frame can't); then just move
+  // your hand — the part rides the fingertip 1:1, and a fast flick or pulling it clear and letting go
+  // dissolves it. No pinch is involved, which is the whole fix: bringing the thumb in to pinch used to be
+  // misread as the grab mid-motion. Stepping unconditionally is what makes a release always land, even if
+  // the hand leaves frame mid-pull. Only raycast while the machine is still choosing a target.
+  const tip = solo ? landmarkToWorld(solo.h[INDEX_TIP], HAND_SPAN, HAND_DEPTH) : null;
+  if (tip) { _tipW.set(tip.x, tip.y, tip.z); pivot.worldToLocal(_tipW); }     // fingertip in the model's own space
   const aimedPart = solo && solo.pose === 'point' && (aim.phase === 'off' || aim.phase === 'aim') ? pointAt(solo.h) : null;
-  const pull = grabOrigin && soloC ? Math.hypot(soloC.x - grabOrigin.x, soloC.y - grabOrigin.y) * PULL_GAIN : 0;
-  aim = aimStep(aim, { pose: solo?.pose ?? null, id: aimedPart?.userData.pid ?? null, now: performance.now(), pulled: pull > PULL_EJECT },
-                { dwellMs: DWELL_MS, holdMs: LOCK_HOLD_MS });
-  if (aim.action === 'lock') { locked = parts[aim.id]; setHighlight(locked); ghostOthers(locked); }
-  else if (aim.action === 'grab') { grabOrigin = soloC; }
-  else if (aim.action) {                                                   // 'remove' or 'drop': the hand let go
+  let drag = 0, speed = 0;
+  if (aim.phase === 'grab' && locked && tip && grabTip) {                     // grabbed: the part follows the fingertip
+    _d.copy(_tipW).sub(grabTip);                                             // how far the finger has travelled since the grab
+    drag = _d.length();
+    speed = _tipW.distanceTo(_tipPrev);                                      // per-frame travel = flick speed
+    if (drag > 1e-4) { locked.userData.pdir.copy(_d).normalize(); locked.userData.pullT = drag; }  // move left => part goes left
+    _tipPrev.copy(_tipW);
+  }
+  aim = aimStep(aim, { pose: solo?.pose ?? null, id: aimedPart?.userData.pid ?? null, now: performance.now(),
+                       pulled: drag > PULL_EJECT, fling: speed > FLING_SPEED && drag > 0.3 },
+                { dwellMs: GRAB_DWELL_MS });
+  if (aim.action === 'grab') { locked = parts[aim.id]; setHighlight(locked); ghostOthers(locked); grabTip = _tipW.clone(); _tipPrev.copy(_tipW); }
+  else if (aim.action) {                                                     // 'remove' or 'drop': the finger let go (or flung)
     if (aim.action === 'remove') ejectPart(locked);
     else if (locked) locked.userData.pullT = 0;                            // short of the threshold: eases back home
-    locked = null; grabOrigin = null; ghostOthers(null);
+    locked = null; grabTip = null; ghostOthers(null);
   }
 
   if (active.length >= 2) {                                                  // two live hands
@@ -685,22 +696,16 @@ function applyGestures(hands) {
       stateEl.textContent = target.explode > 0.05 ? `Exploded ${Math.round(target.explode * 100)}%` : 'Spread to explode · twist to roll';
       setMode('explode');
     }
-  } else if (aim.phase === 'grab') {                                         // pulling a locked part out
-    if (locked) locked.userData.pullT = pull;
+  } else if (aim.phase === 'grab') {                                         // part is riding the fingertip (pullT already set above)
     prevCenter = null; prevSpread = null; prevAngle = null; idle = false;
     setHighlight(locked);
-    stateEl.textContent = pull > PULL_EJECT
-      ? `✂ RELEASE TO REMOVE — ${locked?.userData.label}`
-      : `Pulling ${locked?.userData.label}  ${bar(pull / PULL_EJECT)}`;
+    stateEl.textContent = drag > PULL_EJECT
+      ? `✂ fling it, or open your hand — ${locked?.userData.label}`
+      : `✊ ${locked?.userData.label} — move to pull it out  ${bar(drag / PULL_EJECT)}`;
     setMode('grab');
-  } else if (aim.phase === 'lock') {                                         // armed: pinch to commit, or wait it out
-    prevCenter = null; prevSpread = null; prevAngle = null; idle = false;
-    setHighlight(locked);
-    stateEl.textContent = `◎ LOCKED ${locked?.userData.label} — pinch to pull it out`;
-    setMode('lock');
   } else if (aim.phase === 'aim') {                                          // dwelling on a part
     prevCenter = null; prevSpread = null; prevAngle = null; idle = false;
-    stateEl.textContent = `▶ ${aimedPart?.userData.label}  ${bar(aim.progress)} hold to lock`;
+    stateEl.textContent = `▶ ${aimedPart?.userData.label}  ${bar(aim.progress)} hold to grab`;
     setMode('inspect');
   } else if (solo && solo.pose === 'pinch') {                                // one pinch => rotate
     const c = soloC;

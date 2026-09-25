@@ -96,39 +96,44 @@ assert.equal(handPose(pinched), 'pinch', 'thumb+index together => pinch');
   assert.ok(Math.abs(world(min, 'y') - (-1.6)) < 1e-9, 'feet rest exactly on the floor');
 }
 
-// aimStep: the part-removal state machine, driven by a fake clock. The whole point of the dwell
-// is that nothing gets deleted by accident, so the assertions that matter are the ones proving a
-// plain pinch never removes anything and a lock you don't commit to expires on its own.
+// aimStep: the pinch-free part-removal machine, driven by a fake clock. The point of the long dwell is
+// that nothing gets grabbed by accident; the point of the rewrite is that no pinch is involved anywhere,
+// so the finger never has to change pose to grab or drag (forming the pinch was what the tracker kept
+// misreading). A fling (fast) or a pull-clear-then-release removes; a release near home just drops it.
 {
-  const O = { dwellMs: 600, holdMs: 2500 };
+  const O = { dwellMs: 600 };
   const step = (st, i) => aimStep(st, i, O);
 
-  // a bare pinch with nothing locked must stay out of the way — that's the rotate gesture
-  assert.equal(step(AIM_OFF, { pose: 'pinch', id: null, now: 0 }).phase, 'off', 'pinch alone never arms removal');
+  // only a steady point at a real part may start the machine — a pinch is the rotate gesture, hands off
+  assert.equal(step(AIM_OFF, { pose: 'pinch', id: 3, now: 0 }).phase, 'off', 'a pinch never arms removal (it rotates)');
+  assert.equal(step(AIM_OFF, { pose: 'open',  id: 3, now: 0 }).phase, 'off', 'an open hand arms nothing');
   assert.equal(step(AIM_OFF, { pose: 'point', id: null, now: 0 }).phase, 'off', 'pointing at empty space arms nothing');
 
-  // point at part 3 and hold: dwell fills, then locks
+  // point at part 3 and hold: the dwell fills, then the part grabs onto the finger — no pinch needed
   let s = step(AIM_OFF, { pose: 'point', id: 3, now: 1000 });
   assert.equal(s.phase, 'aim', 'pointing at a part starts the dwell');
   s = step(s, { pose: 'point', id: 3, now: 1300 });
   assert.ok(s.phase === 'aim' && Math.abs(s.progress - 0.5) < 1e-9, 'half-way through the dwell, still only aiming');
   s = step(s, { pose: 'point', id: 3, now: 1600 });
-  assert.ok(s.phase === 'lock' && s.action === 'lock', 'a full dwell locks on and fires once');
+  assert.ok(s.phase === 'grab' && s.action === 'grab' && s.id === 3, 'a full dwell grabs the part onto the finger, firing once');
 
-  // committing: pinch grabs the locked part, and a release past the threshold removes it
-  const grabbed = step(s, { pose: 'pinch', id: null, now: 1700 });
-  assert.ok(grabbed.phase === 'grab' && grabbed.action === 'grab' && grabbed.id === 3, 'pinch grabs the locked part, not the model');
-  assert.equal(step(grabbed, { pose: 'pinch', id: null, now: 2000 }).phase, 'grab', 'holding the pinch keeps hold of it');
-  const out = step(grabbed, { pose: 'open', id: null, now: 2000, pulled: true });
-  assert.ok(out.action === 'remove' && out.id === 3 && out.phase === 'off', 'releasing a pulled-out part removes it');
-  assert.equal(step(grabbed, { pose: 'open', id: null, now: 2000, pulled: false }).action, 'drop', 'releasing short of the threshold snaps it home instead');
-  assert.equal(step(grabbed, { pose: null, id: null, now: 2000, pulled: true }).action, 'remove', 'yanking the hand out of frame still counts as a release');
+  // dragging: keep pointing and it stays grabbed (following the finger); a slow pull-out must NOT remove
+  const held = step(s, { pose: 'point', id: 3, now: 1700 });
+  assert.ok(held.phase === 'grab' && held.action === null, 'holding the point keeps dragging it — no repeat action');
+  assert.equal(step(held, { pose: 'point', id: 3, now: 2000, pulled: true }).phase, 'grab', 'a slow pull-out only repositions — it does not auto-remove');
 
-  // the escape hatches: aim elsewhere, stop pointing, or just wait the lock out
-  assert.ok(step(step(AIM_OFF, { pose: 'point', id: 3, now: 0 }), { pose: 'point', id: 7, now: 300 }).id === 7, 'aiming at a different part restarts the dwell there');
-  assert.equal(step(step(AIM_OFF, { pose: 'point', id: 3, now: 0 }), { pose: 'open', id: null, now: 300 }).phase, 'off', 'dropping the point abandons the dwell');
-  assert.equal(step(s, { pose: 'point', id: 3, now: 1600 + 2600 }).phase, 'off', 'a lock you never commit to expires');
-  assert.equal(step(s, { pose: 'point', id: 3, now: 1600 + 2400 }).phase, 'lock', '...but not before it has to');
+  // removal, three ways in: a fast fling, pulling it clear then letting go, or yanking off-frame while clear
+  assert.equal(step(held, { pose: 'point', id: 3, now: 1800, fling: true }).action, 'remove', 'a fast fling throws it off even mid-point');
+  const out = step(held, { pose: 'open', id: null, now: 2000, pulled: true });
+  assert.ok(out.action === 'remove' && out.id === 3 && out.phase === 'off', 'releasing a pulled-clear part removes it');
+  assert.equal(step(held, { pose: null, id: null, now: 2000, pulled: true }).action, 'remove', 'yanking the hand off-frame while clear still removes');
+
+  // ...but a release short of the eject distance just snaps it home
+  assert.equal(step(held, { pose: 'open', id: null, now: 2000, pulled: false }).action, 'drop', 'letting go near home drops it back, not removed');
+
+  // escape hatches during the dwell: aim elsewhere restarts it, dropping the point abandons it
+  assert.ok(step(step(AIM_OFF, { pose: 'point', id: 3, now: 0 }), { pose: 'point', id: 7, now: 100 }).id === 7, 'aiming at a different part restarts the dwell there');
+  assert.equal(step(step(AIM_OFF, { pose: 'point', id: 3, now: 0 }), { pose: 'open', id: null, now: 100 }).phase, 'off', 'dropping the point abandons the dwell');
 }
 
 // palmPlane: the cut plane the section gesture hands to the renderer. A hand held flat against the
