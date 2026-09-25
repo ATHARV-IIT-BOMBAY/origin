@@ -1,6 +1,6 @@
 // gestures.test.js — the one runnable check for the gesture math.  Run: node gestures.test.js
 import assert from 'node:assert';
-import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread, twoHandAngle, rollDelta, landmarkToWorld, handPose, fitTransform } from './gestures.js';
+import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread, twoHandAngle, rollDelta, landmarkToWorld, handPose, fitTransform, aimStep, AIM_OFF } from './gestures.js';
 
 // Build a synthetic 21-landmark hand: wrist at (0.5,0.9), middle knuckle at (0.5,0.6)
 // => palmSize = 0.3. Thumb/index tips are passed in so we can force open vs pinched.
@@ -94,6 +94,41 @@ assert.equal(handPose(pinched), 'pinch', 'thumb+index together => pinch');
   assert.ok(Math.abs((world(min, 'x') + world(max, 'x')) / 2) < 1e-9, 'centered on X after scaling');
   assert.ok(Math.abs((world(min, 'z') + world(max, 'z')) / 2) < 1e-9, 'centered on Z after scaling');
   assert.ok(Math.abs(world(min, 'y') - (-1.6)) < 1e-9, 'feet rest exactly on the floor');
+}
+
+// aimStep: the part-removal state machine, driven by a fake clock. The whole point of the dwell
+// is that nothing gets deleted by accident, so the assertions that matter are the ones proving a
+// plain pinch never removes anything and a lock you don't commit to expires on its own.
+{
+  const O = { dwellMs: 600, holdMs: 2500 };
+  const step = (st, i) => aimStep(st, i, O);
+
+  // a bare pinch with nothing locked must stay out of the way — that's the rotate gesture
+  assert.equal(step(AIM_OFF, { pose: 'pinch', id: null, now: 0 }).phase, 'off', 'pinch alone never arms removal');
+  assert.equal(step(AIM_OFF, { pose: 'point', id: null, now: 0 }).phase, 'off', 'pointing at empty space arms nothing');
+
+  // point at part 3 and hold: dwell fills, then locks
+  let s = step(AIM_OFF, { pose: 'point', id: 3, now: 1000 });
+  assert.equal(s.phase, 'aim', 'pointing at a part starts the dwell');
+  s = step(s, { pose: 'point', id: 3, now: 1300 });
+  assert.ok(s.phase === 'aim' && Math.abs(s.progress - 0.5) < 1e-9, 'half-way through the dwell, still only aiming');
+  s = step(s, { pose: 'point', id: 3, now: 1600 });
+  assert.ok(s.phase === 'lock' && s.action === 'lock', 'a full dwell locks on and fires once');
+
+  // committing: pinch grabs the locked part, and a release past the threshold removes it
+  const grabbed = step(s, { pose: 'pinch', id: null, now: 1700 });
+  assert.ok(grabbed.phase === 'grab' && grabbed.action === 'grab' && grabbed.id === 3, 'pinch grabs the locked part, not the model');
+  assert.equal(step(grabbed, { pose: 'pinch', id: null, now: 2000 }).phase, 'grab', 'holding the pinch keeps hold of it');
+  const out = step(grabbed, { pose: 'open', id: null, now: 2000, pulled: true });
+  assert.ok(out.action === 'remove' && out.id === 3 && out.phase === 'off', 'releasing a pulled-out part removes it');
+  assert.equal(step(grabbed, { pose: 'open', id: null, now: 2000, pulled: false }).action, 'drop', 'releasing short of the threshold snaps it home instead');
+  assert.equal(step(grabbed, { pose: null, id: null, now: 2000, pulled: true }).action, 'remove', 'yanking the hand out of frame still counts as a release');
+
+  // the escape hatches: aim elsewhere, stop pointing, or just wait the lock out
+  assert.ok(step(step(AIM_OFF, { pose: 'point', id: 3, now: 0 }), { pose: 'point', id: 7, now: 300 }).id === 7, 'aiming at a different part restarts the dwell there');
+  assert.equal(step(step(AIM_OFF, { pose: 'point', id: 3, now: 0 }), { pose: 'open', id: null, now: 300 }).phase, 'off', 'dropping the point abandons the dwell');
+  assert.equal(step(s, { pose: 'point', id: 3, now: 1600 + 2600 }).phase, 'off', 'a lock you never commit to expires');
+  assert.equal(step(s, { pose: 'point', id: 3, now: 1600 + 2400 }).phase, 'lock', '...but not before it has to');
 }
 
 console.log('gestures.test.js: all assertions passed ✓');

@@ -33,6 +33,8 @@
   #modePill.zoom    { color:#bff0ff; border-color:#2aa0ff; box-shadow:0 0 22px rgba(42,160,255,.6); }
   #modePill.explode { color:#ffd39d; border-color:#ff9a3a; box-shadow:0 0 22px rgba(255,140,40,.55); }
   #modePill.inspect { color:#cfe0ff; border-color:#6a9cff; box-shadow:0 0 22px rgba(106,156,255,.55); }
+  #modePill.lock    { color:#fff0a8; border-color:#ffd84a; box-shadow:0 0 26px rgba(255,216,74,.7); animation: pulse 1s ease-in-out infinite; }
+  #modePill.grab    { color:#ffc2b0; border-color:#ff5a3a; box-shadow:0 0 26px rgba(255,90,58,.7); }
   #modePill.park    { color:#ffe08a; border-color:#e0b64a; }
   #modePill.pause   { color:#ff9a9a; border-color:#ff5a5a; box-shadow:0 0 22px rgba(255,90,90,.5); }
   #state { color: #7CFFB2; font-weight: 600; margin-top: 8px; min-height: 1.2em; }
@@ -93,10 +95,11 @@
     <div class="hd"><span>HOLOCONTROL</span><span id="rec" class="rec">STANDBY</span></div>
     <div id="modePill" class="pill">IDLE</div>
     <div id="state">Camera off</div>
-    <div id="stats"><span>Hands <b id="stHands">0</b></span><span>Parts <b id="stParts">0</b></span><span>Scale <b id="stScale">100%</b></span><span>Explode <b id="stExpl">0%</b></span></div>
+    <div id="stats"><span>Hands <b id="stHands">0</b></span><span>Parts <b id="stParts">0</b></span><span>Scale <b id="stScale">100%</b></span><span>Explode <b id="stExpl">0%</b></span><span>Removed <b id="stGone">0</b></span></div>
     <div id="pose"></div>
     <div class="legend">
       <b>Pinch</b> one hand → rotate · <b>point</b> → inspect a part<br/>
+      <b>Point &amp; hold</b> on a part → lock it, then <b>pinch &amp; pull</b> it out and let go → remove<br/>
       Two hands <b>apart / together</b> → explode · two-hand <b>pinch</b> → zoom · <b>twist</b> both → roll<br/>
       Make a <b>fist ✊</b> to park a hand · two fists → pause
     </div>
@@ -105,6 +108,7 @@
       <label class="btn" for="file">Load model</label>
       <input id="file" type="file" accept=".glb,.gltf,.obj,.fbx,.stl,.blend,model/gltf-binary,model/gltf+json" />
       <button id="reset" class="btn2">Reset</button>
+      <button id="restore" class="btn2">Restore parts</button>
       <button id="snap" class="btn2">Snapshot</button>
     </div>
     <div class="row toggles">

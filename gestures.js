@@ -66,6 +66,35 @@ export function rollDelta(prevAngle, ang, { zooming = false, deadzone = 0.012, m
   return (a > deadzone && a <= maxStep) ? d * mirror : 0;
 }
 
+// Part removal: "aim, hold, grab, pull, release" as a pure state machine, so the timing is
+// testable against a fake clock instead of a webcam. Point at a part and hold it to lock on (the
+// dwell is what stops a stray frame from deleting something), then pinch — with a part locked, a
+// pinch grabs THAT PART instead of rotating the model, which is the only reason the two gestures
+// can share a pose. Pull it clear of the assembly and let go.
+//   phase:  'off' -> 'aim' (dwelling) -> 'lock' (armed) -> 'grab' (pulling)
+//   action: one-shot edge for sound/HUD — null | 'lock' | 'grab' | 'remove' | 'drop'
+// `pose` is null when the hand leaves frame. `id` is the part being aimed at (null = nothing).
+// `pulled` says a grabbed part has travelled past the eject threshold, so releasing removes it
+// rather than snapping it home. Returns a fresh state; the caller keeps no other bookkeeping.
+export const AIM_OFF = { phase: 'off', id: null, t0: 0, progress: 0, action: null };
+export function aimStep(st, { pose, id, now, pulled = false }, { dwellMs = 600, holdMs = 2500 } = {}) {
+  if (st.phase === 'grab') {                                  // holding a part: only letting go ends it
+    if (pose === 'pinch') return { ...st, action: null };
+    return { ...AIM_OFF, id: st.id, action: pulled ? 'remove' : 'drop' };
+  }
+  if (pose == null) return AIM_OFF;                           // hand gone
+  if (st.phase === 'lock') {
+    if (pose === 'pinch') return { phase: 'grab', id: st.id, t0: now, progress: 1, action: 'grab' };
+    return now - st.t0 > holdMs ? AIM_OFF : { ...st, action: null };   // armed but never committed
+  }
+  if (pose !== 'point' || id == null) return AIM_OFF;         // not aiming at anything
+  if (st.phase !== 'aim' || st.id !== id) return { phase: 'aim', id, t0: now, progress: 0, action: null };
+  const progress = Math.min(1, (now - st.t0) / dwellMs);
+  return progress >= 1
+    ? { phase: 'lock', id, t0: now, progress: 1, action: 'lock' }
+    : { ...st, progress, action: null };
+}
+
 // Map a normalized image landmark ({x,y in [0,1]}, z ~ relative depth) into three.js
 // world space, so we can draw the hand floating inside the scene. Mirrored on X to match
 // the mirrored webcam preview: move your real hand right, the on-screen hand goes right.

@@ -14,7 +14,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { HandLandmarker, FilesetResolver, DrawingUtils }
   from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18';
-import { handCenter, pinchStrength, twoHandSpread, twoHandAngle, rollDelta, landmarkToWorld, handPose, fitTransform, INDEX_TIP } from './gestures.js';
+import { handCenter, pinchStrength, twoHandSpread, twoHandAngle, rollDelta, landmarkToWorld, handPose, fitTransform, aimStep, AIM_OFF, INDEX_TIP } from './gestures.js';
 
 // ---- Tuning knobs. A webcam is a messy sensor; these are the calibration dials. ----
 // The first four are `let` because the on-screen calibration panel adjusts them live.
@@ -33,22 +33,34 @@ const EXPLODE_K = 1.6;                        // full-explosion expansion: parts
 const EXPLODE_MIN = 0.20, EXPLODE_MAX = 0.75; // two-hand spread range mapped onto 0..1 explosion
 const TWIST_DEADZONE = 0.012;                 // rad/frame of two-hand twist to ignore as jitter, so a zoom/hold doesn't drift into roll
 const BASE_EMISSIVE = 0.6, HIGHLIGHT_EMISSIVE = 2.4; // part glow: resting vs. aimed-at
+// Part removal ("aim, hold, grab, pull, release"). DWELL is the safety: pointing at a part for this
+// long is a deliberate act, a stray frame isn't. PULL_GAIN converts hand travel (normalized image
+// units, so ~0.5 is a big arm move) into how far the part slides out, measured in its own explode-
+// direction lengths — scale-invariant, same trick as EXPLODE_K. Release past PULL_EJECT and it goes.
+const DWELL_MS = 600, LOCK_HOLD_MS = 2500;
+const PULL_GAIN = 4.0, PULL_EJECT = 0.85;
+const EJECT_SPEED = 0.06;   // fade-and-fly-out per frame (~0.3s at 60fps)
+const GHOST_FACTOR = 0.16;  // the rest of the model dims to this fraction of its opacity while a part is locked
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const bar = (f) => '▓'.repeat(Math.round(clamp(f, 0, 1) * 8)).padEnd(8, '░');   // chunky HUD progress bar
 const video = $('video'), overlay = $('overlay'), stateEl = $('state'), errEl = $('err'), poseEl = $('pose');
 const modeEl = $('modePill'), recEl = $('rec');
 
 // ---------- HUD: live mode pill + stats readout ----------
-const MODE_LABEL = { rotate:'ROTATE', zoom:'ZOOM', explode:'EXPLODE', inspect:'INSPECT', park:'PARKED', pause:'PAUSED', idle:'IDLE' };
+const MODE_LABEL = { rotate:'ROTATE', zoom:'ZOOM', explode:'EXPLODE', inspect:'INSPECT', lock:'LOCKED', grab:'EXTRACT', park:'PARKED', pause:'PAUSED', idle:'IDLE' };
 function updateModePill(m) { if (modeEl) { modeEl.textContent = MODE_LABEL[m] || m.toUpperCase(); modeEl.className = 'pill ' + m; } }
-function updateStats(nHands) {
+let lastHands = 0;
+function updateStats(nHands = lastHands) {
+  lastHands = nHands;
   $('stHands').textContent = nHands;
-  $('stParts').textContent = parts.length;
+  $('stParts').textContent = removed.length ? `${parts.length - removed.length}/${parts.length}` : parts.length;
   $('stScale').textContent = Math.round(current.scale * 100) + '%';
   $('stExpl').textContent = Math.round(current.explode * 100) + '%';
+  $('stGone').textContent = removed.length;
 }
 
 // ---------- Web Audio: tiny synth blips for gesture feedback (no audio files) ----------
@@ -72,6 +84,8 @@ const SFX = {                       // sound played when we ENTER each mode (fir
   zoom:    () => blip(760, 0.09, 'triangle'),
   explode: () => blip(300, 0.12, 'sawtooth', 0.05),
   inspect: () => blip(880, 0.05, 'square', 0.03),
+  lock:    () => { blip(1180, 0.06, 'square', 0.04); setTimeout(() => blip(1480, 0.10, 'square', 0.05), 70); }, // two-tone target lock
+  grab:    () => blip(240, 0.10, 'sawtooth', 0.06),
   park:    () => blip(200, 0.10, 'sine'),
   pause:   () => blip(150, 0.16, 'sine'),
 };
@@ -177,6 +191,8 @@ fitToView(model);
 // Shallowest wins ties (traverse is pre-order), which keeps hand-built models like the rocket intact.
 // ponytail: O(n²) since firstMesh re-walks per child; runs once per load, memoize if a model drags.
 let parts = [], partSet = new Set();
+const removed = [];    // parts pulled out and dissolved by the removal gesture — Restore brings them back
+const ejecting = [];   // { p, t, pull0 } mid fly-out-and-fade animation
 function firstMesh(o) { let m = null; o.traverse(c => { if (!m && c.isMesh) m = c; }); return m; }
 function partRoot(root) {
   let best = root, bestN = -1;
@@ -193,14 +209,22 @@ function collectParts(root) {
   // and those parts would have nowhere to travel. Taken in each part's OWN parent space, which is
   // the space .position lives in. A part sitting dead-center gets a zero direction and stays put.
   root.updateMatrixWorld(true);
-  const mid = new THREE.Box3().setFromObject(host).getCenter(new THREE.Vector3());
-  for (const p of parts) {
+  const box = new THREE.Box3().setFromObject(host);
+  const mid = box.getCenter(new THREE.Vector3());
+  const span = box.getSize(new THREE.Vector3()).length() || 1;
+  parts.forEach((p, i) => {
+    p.userData.pid = i;                       // stable handle for the removal state machine
+    p.userData.pull = p.userData.pullT = 0;   // how far it's been pulled out: eased value, and its target
     p.userData.home = p.position.clone();
     const c = new THREE.Box3().setFromObject(p).getCenter(new THREE.Vector3());
     p.userData.dir = p.parent.worldToLocal(c).sub(p.parent.worldToLocal(mid.clone()));
+    // Pulling a part out needs somewhere to pull it, and a dead-center part (a gearbox housing,
+    // say) has a zero explode direction by design. Give those one toward the viewer so they can
+    // still be extracted, without making them drift during a normal explode.
+    p.userData.pdir = p.userData.dir.lengthSq() > 1e-8 ? p.userData.dir : new THREE.Vector3(0, 0, span * 0.35);
     if (!p.userData.core) p.userData.core = firstMesh(p);
     if (p.userData.label == null) p.userData.label = p.name || 'Part';
-  }
+  });
 }
 collectParts(model);
 
@@ -336,6 +360,9 @@ function disposeTree(root) {
 }
 function swapModel(obj) {
   clearHighlight();                 // before the dispose: the highlight holds a material from the OLD model
+  // Drop the removal state rather than restoring it — these parts belong to the model being thrown
+  // away, and `pid` indices into the new `parts` array would point at whatever now sits there.
+  removed.length = 0; ejecting.length = 0; aim = AIM_OFF; locked = null; grabOrigin = null;
   pivot.remove(model); disposeTree(model);
   model = obj; fitToView(model); pivot.add(model);
   collectParts(model); applyHoloSkin(model, holoSkin);
@@ -393,7 +420,7 @@ $('tMirror').addEventListener('change', (e) => { MIRROR_X = e.target.checked ? -
 // ---------- transform state: gestures set `target`, each frame eases `current` toward it ----------
 const target = { rx: 0, ry: 0, rz: 0, scale: 1, explode: 0 };
 const current = { rx: 0, ry: 0, rz: 0, scale: 1, explode: 0 };
-$('reset').addEventListener('click', () => { initAudio(); blip(420, 0.12, 'sine'); target.rx = 0; target.ry = 0; target.rz = 0; target.scale = 1; target.explode = 0; spinVel.rx = spinVel.ry = 0; $('sOffX').value = 0; $('sOffX').dispatchEvent(new Event('input')); }); // recenter on X too (Ground stays: it's stage calibration)
+$('reset').addEventListener('click', () => { initAudio(); blip(420, 0.12, 'sine'); target.rx = 0; target.ry = 0; target.rz = 0; target.scale = 1; target.explode = 0; spinVel.rx = spinVel.ry = 0; restoreParts(); $('sOffX').value = 0; $('sOffX').dispatchEvent(new Event('input')); }); // recenter on X and put removed parts back (Ground stays: it's stage calibration)
 
 // ---------- point-to-inspect: raycast from the camera through the index fingertip ----------
 // The fingertip is drawn into the scene at a fixed plane; a ray from the camera through it
@@ -413,11 +440,17 @@ function setHighlight(part) {
   if (m && 'emissiveIntensity' in m) m.emissiveIntensity = HIGHLIGHT_EMISSIVE;
 }
 function clearHighlight() { setHighlight(null); labelEl.style.opacity = '0'; }
-function pointAt(hand) {                          // highlight+label the aimed part; return its label or null
+function pointAt(hand) {                          // highlight+label the aimed part; returns the part or null
   const w = landmarkToWorld(hand[INDEX_TIP], HAND_SPAN, HAND_DEPTH);
   raycaster.set(camera.position, _tip.set(w.x, w.y, w.z).sub(camera.position).normalize());
-  const hit = raycaster.intersectObject(pivot, true)[0];
-  const part = hit ? findPart(hit.object) : null;
+  // Walk the hits rather than taking the first: three.js raycasts invisible geometry happily, so
+  // without this the ray would keep "hitting" parts you already removed and aiming would go dead
+  // in the holes you'd just made.
+  let part = null, hit = null;
+  for (const h of raycaster.intersectObject(pivot, true)) {
+    const p = findPart(h.object);
+    if (p && p.visible) { part = p; hit = h; break; }
+  }
   setHighlight(part);
   if (!part) { labelEl.style.opacity = '0'; return null; }
   _proj.copy(hit.point).project(camera);
@@ -425,12 +458,42 @@ function pointAt(hand) {                          // highlight+label the aimed p
   labelEl.textContent = part.userData.label;
   labelEl.style.transform = `translate(-50%,-150%) translate(${x}px,${y}px)`;
   labelEl.style.opacity = '1';
-  return part.userData.label;
+  return part;
 }
+
+// ---------- part removal: strip the hologram down a component at a time ----------
+// Materials are dimmed rather than parts hidden, so "isolating" a locked part reads as the rest
+// ghosting out — the Iron Man 1 shot. Original opacity is cached per material on first touch.
+// ponytail: a model whose parts SHARE one material ghosts them together; holo skin (on by default)
+// clones a material per mesh, so this only shows with the skin off. Per-part material clones if so.
+function setPartOpacity(part, f) {
+  part.traverse(o => {
+    if (!o.isMesh) return;
+    for (const m of [o.material].flat()) {
+      if (m.userData.op0 == null) m.userData.op0 = m.opacity;
+      m.transparent = true;
+      m.opacity = m.userData.op0 * f;
+    }
+  });
+}
+function ghostOthers(keep) { for (const p of parts) setPartOpacity(p, keep && p !== keep ? GHOST_FACTOR : 1); }
+function ejectPart(p) {                     // pulled clear and released: fly out, dissolve, book it as removed
+  if (!p || removed.includes(p)) return;
+  ejecting.push({ p, t: 0, pull0: p.userData.pull });
+  blip(140, 0.22, 'sawtooth', 0.07); setTimeout(() => blip(90, 0.3, 'sine', 0.05), 60);
+}
+function restoreParts() {                   // put the whole assembly back (nothing is destroyed, only hidden)
+  for (const p of [...removed, ...ejecting.map(e => e.p)]) { p.visible = true; p.userData.pull = p.userData.pullT = 0; setPartOpacity(p, 1); }
+  removed.length = 0; ejecting.length = 0;
+  aim = AIM_OFF; locked = null; grabOrigin = null;
+  updateStats();
+}
+$('restore').addEventListener('click', () => { initAudio(); blip(560, 0.1, 'triangle'); setTimeout(() => blip(840, 0.12, 'triangle'), 80); restoreParts(); });
 
 // ---------- MediaPipe hand tracking ----------
 let handLandmarker = null, drawUtils = null, running = false, lastVideoTime = -1;
 let prevCenter = null, prevSpread = null, prevAngle = null, idle = true;
+let aim = AIM_OFF, locked = null, grabOrigin = null;   // part-removal machine: state, the locked part, where the pull started
 let dragging = false;                 // true while a pinch is actively rotating the model
 const spinVel = { rx: 0, ry: 0 };     // leftover angular velocity after you let go (flick-to-spin)
 
@@ -474,6 +537,26 @@ function applyGestures(hands) {
   dragging = false;                                                        // set true only while rotating
   poseEl.textContent = classified.map((a, i) => `H${i + 1} ${a.pose} ${pinchStrength(a.h).toFixed(2)}`).join('    ');
 
+  // ---- Part removal, stepped every frame BEFORE anything else can claim the hand. Point at a part
+  // to start a dwell, hold it to lock on, then pinch — with a part locked the pinch pulls THAT PART
+  // out instead of rotating the model, and letting go past the threshold dissolves it. Stepping
+  // unconditionally is what makes releases land: a hand that leaves frame mid-pull still resolves.
+  // Only raycast while the machine is still choosing a target, or the lock would drift to whatever
+  // the finger happens to cross on the way to a pinch.
+  const solo = active.length === 1 ? active[0] : null;
+  const soloC = solo ? handCenter(solo.h) : null;
+  const aimedPart = solo && solo.pose === 'point' && (aim.phase === 'off' || aim.phase === 'aim') ? pointAt(solo.h) : null;
+  const pull = grabOrigin && soloC ? Math.hypot(soloC.x - grabOrigin.x, soloC.y - grabOrigin.y) * PULL_GAIN : 0;
+  aim = aimStep(aim, { pose: solo?.pose ?? null, id: aimedPart?.userData.pid ?? null, now: performance.now(), pulled: pull > PULL_EJECT },
+                { dwellMs: DWELL_MS, holdMs: LOCK_HOLD_MS });
+  if (aim.action === 'lock') { locked = parts[aim.id]; setHighlight(locked); ghostOthers(locked); }
+  else if (aim.action === 'grab') { grabOrigin = soloC; }
+  else if (aim.action) {                                                   // 'remove' or 'drop': the hand let go
+    if (aim.action === 'remove') ejectPart(locked);
+    else if (locked) locked.userData.pullT = 0;                            // short of the threshold: eases back home
+    locked = null; grabOrigin = null; ghostOthers(null);
+  }
+
   if (active.length >= 2) {                                                  // two live hands
     const spread = twoHandSpread(active[0].h, active[1].h);
     const ang = twoHandAngle(active[0].h, active[1].h);                      // twist both hands (like a wheel) => roll
@@ -494,8 +577,25 @@ function applyGestures(hands) {
       stateEl.textContent = target.explode > 0.05 ? `Exploded ${Math.round(target.explode * 100)}%` : 'Spread to explode · twist to roll';
       setMode('explode');
     }
-  } else if (active.length === 1 && active[0].pose === 'pinch') {            // one pinch => rotate
-    const c = handCenter(active[0].h);
+  } else if (aim.phase === 'grab') {                                         // pulling a locked part out
+    if (locked) locked.userData.pullT = pull;
+    prevCenter = null; prevSpread = null; prevAngle = null; idle = false;
+    setHighlight(locked);
+    stateEl.textContent = pull > PULL_EJECT
+      ? `✂ RELEASE TO REMOVE — ${locked?.userData.label}`
+      : `Pulling ${locked?.userData.label}  ${bar(pull / PULL_EJECT)}`;
+    setMode('grab');
+  } else if (aim.phase === 'lock') {                                         // armed: pinch to commit, or wait it out
+    prevCenter = null; prevSpread = null; prevAngle = null; idle = false;
+    setHighlight(locked);
+    stateEl.textContent = `◎ LOCKED ${locked?.userData.label} — pinch to pull it out`;
+    setMode('lock');
+  } else if (aim.phase === 'aim') {                                          // dwelling on a part
+    prevCenter = null; prevSpread = null; prevAngle = null; idle = false;
+    stateEl.textContent = `▶ ${aimedPart?.userData.label}  ${bar(aim.progress)} hold to lock`;
+    setMode('inspect');
+  } else if (solo && solo.pose === 'pinch') {                                // one pinch => rotate
+    const c = soloC;
     if (prevCenter) {
       const dry = (c.x - prevCenter.x) * ROT_SPEED * MIRROR_X;
       const drx = (c.y - prevCenter.y) * ROT_SPEED;
@@ -504,11 +604,10 @@ function applyGestures(hands) {
       spinVel.rx = spinVel.rx * (1 - SPIN_CAPTURE) + drx * SPIN_CAPTURE;
     }
     prevCenter = c; prevSpread = null; prevAngle = null; idle = false; dragging = true; clearHighlight();
-    stateEl.textContent = `Rotate (pinch ${pinchStrength(active[0].h).toFixed(2)})`; setMode('rotate');
-  } else if (active.length === 1 && active[0].pose === 'point') {            // one point => inspect
+    stateEl.textContent = `Rotate (pinch ${pinchStrength(solo.h).toFixed(2)})`; setMode('rotate');
+  } else if (solo && solo.pose === 'point') {                                // pointing at empty space
     prevCenter = null; prevSpread = null; prevAngle = null; idle = false;
-    const name = pointAt(active[0].h);
-    stateEl.textContent = name ? `▶ ${name}` : 'Point at a part'; setMode('inspect');
+    stateEl.textContent = 'Point at a part'; setMode('inspect');
   } else {                                                                   // nothing live => drift
     prevCenter = null; prevSpread = null; prevAngle = null; idle = true; clearHighlight();
     stateEl.textContent = parked >= 2 ? '✊ paused'
@@ -551,7 +650,22 @@ function loop() {
   current.rz += (target.rz - current.rz) * SMOOTH;
   current.scale += (target.scale - current.scale) * SMOOTH;
   current.explode += (target.explode - current.explode) * SMOOTH;
-  for (const p of parts) p.position.copy(p.userData.home).addScaledVector(p.userData.dir, current.explode * EXPLODE_K);
+  // Ejecting parts keep accelerating outward while they fade, so a removal reads as the piece being
+  // thrown clear of the assembly rather than just blinking off. `pull` eases like everything else,
+  // which is what makes a hand-pull feel weighted and a released part settle back instead of snapping.
+  for (let i = ejecting.length - 1; i >= 0; i--) {
+    const e = ejecting[i];
+    e.t += EJECT_SPEED;
+    e.p.userData.pullT = e.pull0 + e.t * 1.5;
+    setPartOpacity(e.p, Math.max(0, 1 - e.t));
+    if (e.t >= 1) { e.p.visible = false; e.p.userData.pull = e.p.userData.pullT = 0; ejecting.splice(i, 1); removed.push(e.p); updateStats(); }
+  }
+  for (const p of parts) {
+    p.userData.pull += (p.userData.pullT - p.userData.pull) * SMOOTH;
+    p.position.copy(p.userData.home)
+      .addScaledVector(p.userData.dir, current.explode * EXPLODE_K)
+      .addScaledVector(p.userData.pdir, p.userData.pull);
+  }
   pivot.rotation.set(current.rx, current.ry, current.rz);
   pivot.scale.setScalar(current.scale);
   for (const r of reticle.children) r.rotateOnWorldAxis(_up, 0.004 * r.userData.dir); // flat spin, projector look
