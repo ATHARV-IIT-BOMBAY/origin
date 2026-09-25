@@ -169,16 +169,35 @@ function fitToView(obj) { // drop any model centered on the stage with its feet 
 }
 fitToView(model);
 
-// Parts = the model's direct children that carry geometry. Each remembers its resting
-// position (home); the explode gesture pushes every part radially out from the model's center
-// (an exploded-view expansion) and snaps them home. Parts sitting at dead-center don't travel.
+// Parts = the pieces the explode and point-to-inspect gestures act on. Downloaded models never hand
+// you those as the top-level children: Sketchfab wraps everything in a chain of single-child nodes
+// (Sketchfab_model ▸ LEGO.fbx ▸ Object_2 ▸ RootNode ▸ …) and often bolts on extras like a floor
+// plane, so the direct children are one lone group, "Parts" reads 1, and nothing explodes. Scan the
+// whole tree and take the node with the MOST mesh-bearing children — that's the assembly level.
+// Shallowest wins ties (traverse is pre-order), which keeps hand-built models like the rocket intact.
+// ponytail: O(n²) since firstMesh re-walks per child; runs once per load, memoize if a model drags.
 let parts = [], partSet = new Set();
 function firstMesh(o) { let m = null; o.traverse(c => { if (!m && c.isMesh) m = c; }); return m; }
+function partRoot(root) {
+  let best = root, bestN = -1;
+  root.traverse(o => { const n = o.children.filter(firstMesh).length; if (n > bestN) { best = o; bestN = n; } });
+  return best;
+}
 function collectParts(root) {
-  parts = root.children.filter(firstMesh);
+  const host = partRoot(root);
+  parts = host.children.filter(firstMesh);
+  if (parts.length < 2) { parts = []; root.traverse(c => { if (c.isMesh) parts.push(c); }); } // last resort: every mesh
   partSet = new Set(parts);
+  // Explode direction per part: model center -> part center, measured from bounding boxes rather
+  // than node origins, because exporters routinely bake transforms so every node sits at (0,0,0)
+  // and those parts would have nowhere to travel. Taken in each part's OWN parent space, which is
+  // the space .position lives in. A part sitting dead-center gets a zero direction and stays put.
+  root.updateMatrixWorld(true);
+  const mid = new THREE.Box3().setFromObject(host).getCenter(new THREE.Vector3());
   for (const p of parts) {
     p.userData.home = p.position.clone();
+    const c = new THREE.Box3().setFromObject(p).getCenter(new THREE.Vector3());
+    p.userData.dir = p.parent.worldToLocal(c).sub(p.parent.worldToLocal(mid.clone()));
     if (!p.userData.core) p.userData.core = firstMesh(p);
     if (p.userData.label == null) p.userData.label = p.name || 'Part';
   }
@@ -506,7 +525,7 @@ function loop() {
   current.rz += (target.rz - current.rz) * SMOOTH;
   current.scale += (target.scale - current.scale) * SMOOTH;
   current.explode += (target.explode - current.explode) * SMOOTH;
-  for (const p of parts) p.position.copy(p.userData.home).multiplyScalar(1 + current.explode * EXPLODE_K);
+  for (const p of parts) p.position.copy(p.userData.home).addScaledVector(p.userData.dir, current.explode * EXPLODE_K);
   pivot.rotation.set(current.rx, current.ry, current.rz);
   pivot.scale.setScalar(current.scale);
   for (const r of reticle.children) r.rotateOnWorldAxis(_up, 0.004 * r.userData.dir); // flat spin, projector look
