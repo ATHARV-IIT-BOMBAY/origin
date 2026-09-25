@@ -108,6 +108,7 @@
   #modePill.inspect { color:#cfe0ff; border-color:#6a9cff;      background:rgba(106,156,255,.10); box-shadow:inset 0 0 26px rgba(106,156,255,.13); }
   #modePill.lock    { color:#fff0a8; border-color:var(--warn);  background:rgba(255,194,58,.13);  box-shadow:inset 0 0 30px rgba(255,194,58,.20); animation: blink 1s ease-in-out infinite; }
   #modePill.grab    { color:#ffc7b6; border-color:var(--alert); background:rgba(255,90,58,.14);   box-shadow:inset 0 0 30px rgba(255,90,58,.20); }
+  #modePill.section { color:#d6c4ff; border-color:#a37bff;      background:rgba(163,123,255,.12); box-shadow:inset 0 0 30px rgba(163,123,255,.18); }
   #modePill.park    { color:#ffe3a0; border-color:#e0b64a; }
   #modePill.pause   { color:#ffa8a8; border-color:var(--alert); background:rgba(255,90,90,.10); }
 
@@ -147,6 +148,9 @@
   .btn2 { color: var(--cy) !important; background: rgba(53,200,255,.09) !important;
           border-color: var(--cy-dim) !important; }
   .btn2:hover { background: rgba(53,200,255,.2) !important; color: #dff6ff !important; }
+  /* an armed mode has to look armed — Section latches on, unlike every other button here */
+  #secBtn.on { color: #e6dbff !important; background: rgba(163,123,255,.22) !important;
+               border-color: #a37bff !important; box-shadow: 0 0 22px rgba(163,123,255,.45); }
 
   .toggles { grid-template-columns: 1fr 1fr; gap: 6px 10px; }
   .chk { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; letter-spacing: .6px;
@@ -326,7 +330,7 @@
       <label class="chk"><input type="checkbox" id="tBloom" checked/> Bloom</label>
       <label class="chk"><input type="checkbox" id="tGrid" checked/> Grid</label>
     </div>
-    <div class="row"><button id="tuneBtn" class="btn2">⚙ Calibrate</button></div>
+    <div class="row g2"><button id="secBtn" class="btn2">◧ Section</button><button id="tuneBtn" class="btn2">⚙ Calibrate</button></div>
 
     <div id="tune" class="hidden">
       <div class="tt">Stage calibration</div>
@@ -344,6 +348,7 @@
     </div>
 
     <div class="hint">Upload .glb / .gltf / .obj / .fbx / .stl — Blender? File ▸ Export ▸ glTF 2.0 (.glb).</div>
+    <div class="hint">No camera? Drag to rotate · scroll to zoom · <b>←↑↓→</b> turn · <b>[ ]</b> explode · <b>C</b> section · <b>R</b> reset · <b>P</b> snapshot.</div>
     <div id="err"></div>
   </div>
 
@@ -355,6 +360,7 @@
     <div class="lg"><i>🤞</i><span><b>Both pinch</b> zoom</span></div>
     <div class="lg"><i>🔄</i><span><b>Twist</b> roll</span></div>
     <div class="lg"><i>✊</i><span><b>Fist</b> park</span></div>
+    <div class="lg"><i>◧</i><span><b>Palm</b> section</span></div>
   </div>
 
   <script type="importmap">

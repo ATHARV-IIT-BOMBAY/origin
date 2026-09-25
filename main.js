@@ -14,7 +14,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { HandLandmarker, FilesetResolver, DrawingUtils }
   from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18';
-import { handCenter, pinchStrength, twoHandSpread, twoHandAngle, rollDelta, landmarkToWorld, handPose, fitTransform, aimStep, AIM_OFF, INDEX_TIP } from './gestures.js';
+import { handCenter, pinchStrength, twoHandSpread, twoHandAngle, rollDelta, landmarkToWorld, handPose, fitTransform, aimStep, AIM_OFF, palmPlane, INDEX_TIP } from './gestures.js';
 
 // ---- Tuning knobs. A webcam is a messy sensor; these are the calibration dials. ----
 // The first four are `let` because the on-screen calibration panel adjusts them live.
@@ -41,6 +41,8 @@ const DWELL_MS = 600, LOCK_HOLD_MS = 2500;
 const PULL_GAIN = 4.0, PULL_EJECT = 0.85;
 const EJECT_SPEED = 0.06;   // fade-and-fly-out per frame (~0.3s at 60fps)
 const GHOST_FACTOR = 0.16;  // the rest of the model dims to this fraction of its opacity while a part is locked
+const CUT_SMOOTH = 0.15;    // ease on the section plane — MediaPipe's landmark depth is noisy, and an unsmoothed plane strobes
+const CUT_PARKED = 1e6;     // plane constant that puts the cut so far away nothing is clipped (see clipPlane)
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm';
 
@@ -51,7 +53,7 @@ const video = $('video'), overlay = $('overlay'), stateEl = $('state'), errEl = 
 const modeEl = $('modePill'), recEl = $('rec');
 
 // ---------- HUD: live mode pill + stats readout ----------
-const MODE_LABEL = { rotate:'ROTATE', zoom:'ZOOM', explode:'EXPLODE', inspect:'INSPECT', lock:'LOCKED', grab:'EXTRACT', park:'PARKED', pause:'PAUSED', idle:'IDLE' };
+const MODE_LABEL = { rotate:'ROTATE', zoom:'ZOOM', explode:'EXPLODE', inspect:'INSPECT', lock:'LOCKED', grab:'EXTRACT', section:'SECTION', park:'PARKED', pause:'PAUSED', idle:'IDLE' };
 function updateModePill(m) { if (modeEl) { modeEl.textContent = MODE_LABEL[m] || m.toUpperCase(); modeEl.className = 'pill ' + m; } }
 let lastHands = 0;
 function updateStats(nHands = lastHands) {
@@ -86,6 +88,7 @@ const SFX = {                       // sound played when we ENTER each mode (fir
   inspect: () => blip(880, 0.05, 'square', 0.03),
   lock:    () => { blip(1180, 0.06, 'square', 0.04); setTimeout(() => blip(1480, 0.10, 'square', 0.05), 70); }, // two-tone target lock
   grab:    () => blip(240, 0.10, 'sawtooth', 0.06),
+  section: () => { blip(420, 0.05, 'square', 0.03); setTimeout(() => blip(1050, 0.16, 'sine', 0.04), 50); }, // a "slice"
   park:    () => blip(200, 0.10, 'sine'),
   pause:   () => blip(150, 0.16, 'sine'),
 };
@@ -96,6 +99,7 @@ function setMode(m) { if (m === lastMode) return; lastMode = m; updateModePill(m
 // preserveDrawingBuffer lets the Snapshot button read the canvas back as a PNG.
 const renderer = new THREE.WebGLRenderer({ canvas: $('three'), antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.localClippingEnabled = true;   // per-material clipping, so the section plane cuts the model but not its own indicator
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0a0a0f);
 const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
@@ -133,6 +137,48 @@ scene.add(pivot);
 // Move the whole stage (floor grid + projector reticle) to a new base height and lift the model with
 // it, so the model's feet stay planted on the base wherever you set it. fitToView grounds to FLOOR_Y.
 function setGround(y) { grid.position.y = y; reticle.position.y = y + 0.05; pivot.position.y = y - FLOOR_Y; }
+
+// ---------- section plane: your palm is the knife ----------
+// Three points on the back of the hand give a plane (gestures.palmPlane); three.js clips every
+// fragment on its negative side, so the model is cut open live and turning your palm over swaps
+// which half survives. The plane is handed to the MODEL's materials rather than to
+// renderer.clippingPlanes, because a global plane would also slice the indicator quad drawn on it.
+// It's never removed from the array — disarming parks it a million units away instead. Changing the
+// NUMBER of clipping planes recompiles every shader, and doing that on a gesture would stutter.
+// ponytail: an open cut, no cap — a sectioned solid reads hollow. Capping needs a stencil pass.
+const clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), CUT_PARKED);
+const CLIP = [clipPlane];                      // one shared array: mutate the plane, never the list
+function applyClip(root) {
+  root.traverse(o => { if (o.isMesh) for (const m of [o.material].flat()) if (m) m.clippingPlanes = CLIP; });
+}
+const cutViz = new THREE.Group(); cutViz.visible = false; scene.add(cutViz);
+{
+  const quad = new THREE.PlaneGeometry(4.4, 4.4);
+  cutViz.add(
+    new THREE.Mesh(quad, new THREE.MeshBasicMaterial({
+      color: 0x35c8ff, transparent: true, opacity: 0.06, side: THREE.DoubleSide, depthWrite: false })),
+    new THREE.LineSegments(new THREE.EdgesGeometry(quad), new THREE.LineBasicMaterial({
+      color: 0x66e0ff, transparent: true, opacity: 0.75 })));
+}
+const _cutN = new THREE.Vector3(0, 0, 1), _cutP = new THREE.Vector3(), _pgZ = new THREE.Vector3(0, 0, 1);
+const _tn = new THREE.Vector3(), _tp = new THREE.Vector3();   // per-frame scratch, kept out of the GC's way
+let sectionOn = false;
+function updateCut(hand) {          // ease the plane toward the palm — raw landmark depth strobes
+  const { point, normal } = palmPlane(hand, HAND_SPAN, HAND_DEPTH);
+  _cutN.lerp(_tn.set(normal.x, normal.y, normal.z), CUT_SMOOTH).normalize();
+  _cutP.lerp(_tp.set(point.x, point.y, point.z), CUT_SMOOTH);
+  clipPlane.setFromNormalAndCoplanarPoint(_cutN, _cutP);
+  cutViz.position.copy(_cutP);
+  cutViz.quaternion.setFromUnitVectors(_pgZ, _cutN);
+}
+function setSection(on) {
+  sectionOn = on;
+  cutViz.visible = on;
+  if (!on) clipPlane.constant = CUT_PARKED;   // park it rather than drop it: see the note above
+  else { aim = AIM_OFF; locked = null; grabOrigin = null; ghostOthers(null); clearHighlight(); }
+  $('secBtn').classList.toggle('on', on);
+  initAudio(); blip(on ? 880 : 300, 0.09, 'square', 0.04);
+}
 
 // Hologram-styled part: translucent lit core + bright wireframe overlay (the bit that blooms).
 // Grouped so a whole part can be raycast, highlighted, and flown out as a single unit.
@@ -225,6 +271,7 @@ function collectParts(root) {
     if (!p.userData.core) p.userData.core = firstMesh(p);
     if (p.userData.label == null) p.userData.label = p.name || 'Part';
   });
+  applyClip(root);   // every material has to carry the section plane, or half the model ignores the cut
 }
 collectParts(model);
 
@@ -256,6 +303,7 @@ function applyHoloSkin(root, on) {
       if (o.userData.wire) o.userData.wire.visible = false;
     }
   });
+  applyClip(root);   // the skin swaps in fresh materials, which arrive without the section plane
 }
 
 // ---------- hand skeleton drawn INTO the 3D scene (your hand appears inside the hologram) ----------
@@ -401,6 +449,7 @@ $('snap').addEventListener('click', () => {                 // one-tap PNG of th
   a.download = 'holocontrol-' + Date.now() + '.png';
   a.href = renderer.domElement.toDataURL('image/png'); a.click();
 });
+$('secBtn').addEventListener('click', () => setSection(!sectionOn));
 $('tuneBtn').addEventListener('click', () => { initAudio(); $('tune').classList.toggle('hidden'); });
 function bindRange(id, apply, outId, fmt) {                 // wire a slider to a live tuning variable
   const el = $(id), out = $(outId);
@@ -421,6 +470,52 @@ $('tMirror').addEventListener('change', (e) => { MIRROR_X = e.target.checked ? -
 const target = { rx: 0, ry: 0, rz: 0, scale: 1, explode: 0 };
 const current = { rx: 0, ry: 0, rz: 0, scale: 1, explode: 0 };
 $('reset').addEventListener('click', () => { initAudio(); blip(420, 0.12, 'sine'); target.rx = 0; target.ry = 0; target.rz = 0; target.scale = 1; target.explode = 0; spinVel.rx = spinVel.ry = 0; restoreParts(); $('sOffX').value = 0; $('sOffX').dispatchEvent(new Event('input')); }); // recenter on X and put removed parts back (Ground stays: it's stage calibration)
+
+// ---------- mouse & keyboard fallback ----------
+// The demo can't depend on a webcam. Someone with no camera — or who dismisses the permission
+// prompt — would otherwise get an auto-spinning rocket and no way in at all. These write the SAME
+// `target` the gestures write, so there's no second code path downstream, and they stay live during
+// tracking, which is how you hold a model still for a screenshot.
+let manualT = 0;                       // hold off the idle turntable for a moment after any manual input
+const manual = () => { manualT = performance.now() + 2500; };
+const cv = renderer.domElement;
+let drag0 = null;
+cv.addEventListener('pointerdown', (e) => { drag0 = { x: e.clientX, y: e.clientY }; cv.setPointerCapture(e.pointerId); manual(); });
+cv.addEventListener('pointerup', () => { drag0 = null; dragging = false; });
+cv.addEventListener('pointermove', (e) => {
+  if (!drag0) return;
+  // Both axes divide by innerHeight so a diagonal drag turns the model diagonally instead of
+  // skewing with the window's aspect ratio.
+  const dry = (e.clientX - drag0.x) / innerHeight * 3, drx = (e.clientY - drag0.y) / innerHeight * 3;
+  target.ry += dry; target.rx += drx;
+  spinVel.ry = spinVel.ry * (1 - SPIN_CAPTURE) + dry * SPIN_CAPTURE;   // same flick-to-spin as a pinch drag
+  spinVel.rx = spinVel.rx * (1 - SPIN_CAPTURE) + drx * SPIN_CAPTURE;
+  drag0 = { x: e.clientX, y: e.clientY }; dragging = true; manual();
+});
+cv.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  target.scale = clamp(target.scale * (1 - e.deltaY * 0.0015), SCALE_MIN, SCALE_MAX); manual();
+}, { passive: false });
+const zoomBy = (f) => target.scale = clamp(target.scale * f, SCALE_MIN, SCALE_MAX);
+const KEYS = {                          // arg is the rotation step (bigger with Shift)
+  ArrowLeft: (s) => target.ry -= s, ArrowRight: (s) => target.ry += s,
+  ArrowUp:   (s) => target.rx -= s, ArrowDown:  (s) => target.rx += s,
+  '[': () => target.explode = clamp(target.explode - 0.1, 0, 1),
+  ']': () => target.explode = clamp(target.explode + 0.1, 0, 1),
+  '=': () => zoomBy(1.1), '+': () => zoomBy(1.1), '-': () => zoomBy(1 / 1.1),
+  c: () => setSection(!sectionOn),
+  r: () => $('reset').click(),
+  x: () => $('restore').click(),
+  p: () => $('snap').click(),
+};
+addEventListener('keydown', (e) => {
+  // Let the browser have its own chords, and don't steal keys from a focused control (the sliders
+  // are arrow-key operated, and Space/Enter on a focused button must still press it).
+  if (e.metaKey || e.ctrlKey || e.altKey || e.target?.closest?.('input, select, textarea, button')) return;
+  const fn = KEYS[e.key.length === 1 ? e.key.toLowerCase() : e.key];
+  if (!fn) return;
+  e.preventDefault(); fn(e.shiftKey ? 0.3 : 0.1); manual();
+});
 
 // ---------- point-to-inspect: raycast from the camera through the index fingertip ----------
 // The fingertip is drawn into the scene at a fixed plane; a ray from the camera through it
@@ -537,14 +632,27 @@ function applyGestures(hands) {
   dragging = false;                                                        // set true only while rotating
   poseEl.textContent = classified.map((a, i) => `H${i + 1} ${a.pose} ${pinchStrength(a.h).toFixed(2)}`).join('    ');
 
+  const solo = active.length === 1 ? active[0] : null;
+  const soloC = solo ? handCenter(solo.h) : null;
+
+  // ---- Section takes the hand outright while it's armed, before any other gesture can claim it:
+  // a cut plane you have to share with rotate-on-pinch would swing the model every time you turned
+  // your wrist. Make a fist (or drop your hand) and the plane freezes where you left it, so you can
+  // take your hand out of frame and actually look at the cross-section.
+  if (sectionOn) {
+    if (solo) updateCut(solo.h);
+    prevCenter = null; prevSpread = null; prevAngle = null; idle = false; clearHighlight();
+    stateEl.textContent = solo ? '◧ Sectioning — turn your palm to cut · ✊ to freeze' : '◧ Section frozen — show a hand to move it';
+    setMode('section'); updateStats(hands.length);
+    return;
+  }
+
   // ---- Part removal, stepped every frame BEFORE anything else can claim the hand. Point at a part
   // to start a dwell, hold it to lock on, then pinch — with a part locked the pinch pulls THAT PART
   // out instead of rotating the model, and letting go past the threshold dissolves it. Stepping
   // unconditionally is what makes releases land: a hand that leaves frame mid-pull still resolves.
   // Only raycast while the machine is still choosing a target, or the lock would drift to whatever
   // the finger happens to cross on the way to a pinch.
-  const solo = active.length === 1 ? active[0] : null;
-  const soloC = solo ? handCenter(solo.h) : null;
   const aimedPart = solo && solo.pose === 'point' && (aim.phase === 'off' || aim.phase === 'aim') ? pointAt(solo.h) : null;
   const pull = grabOrigin && soloC ? Math.hypot(soloC.x - grabOrigin.x, soloC.y - grabOrigin.y) * PULL_GAIN : 0;
   aim = aimStep(aim, { pose: solo?.pose ?? null, id: aimedPart?.userData.pid ?? null, now: performance.now(), pulled: pull > PULL_EJECT },
@@ -641,7 +749,7 @@ function loop() {
     target.ry += spinVel.ry; target.rx += spinVel.rx;
     spinVel.ry *= SPIN_FRICTION; spinVel.rx *= SPIN_FRICTION;
     if (Math.hypot(spinVel.rx, spinVel.ry) < SPIN_MIN) spinVel.rx = spinVel.ry = 0;
-  } else if (idle && autoSpin) target.ry += IDLE_SPIN;   // gentle turntable so the hologram feels alive
+  } else if (idle && autoSpin && performance.now() > manualT) target.ry += IDLE_SPIN;   // gentle turntable so the hologram feels alive
   if (lockX) target.rx = current.rx;   // held axes stop accumulating, so unlocking resumes smoothly (no snap)
   if (lockY) target.ry = current.ry;
   if (lockZ) target.rz = current.rz;
