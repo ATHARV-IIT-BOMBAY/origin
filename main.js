@@ -40,7 +40,7 @@ const BASE_EMISSIVE = 0.6, HIGHLIGHT_EMISSIVE = 2.4; // part glow: resting vs. a
 // into the bin and it dissolves; let go anywhere else (hand gone / fist / two hands) and it snaps home.
 const GRAB_DWELL_MS = 5000;         // ponytail: the 5s "inspect then grab" hold the user asked for; tune here if it feels long
 const HL_INFO = 0x2ad0ff, HL_GRAB = 0xff2a2a;  // emissive tint: blue while inspecting, red once it's grabbed and moveable
-const BIN_RADIUS = 0.75;            // ponytail: world-space reach to drop a part into the bin — tune with the bin position on real hardware
+const BIN_RADIUS = 0.9;             // ponytail: world-space reach to drop a part into the bin — generous so you needn't push your hand to the frame edge; tune on real hardware
 const EJECT_SPEED = 0.055;  // dissolve speed per frame (~0.3s at 60fps)
 const GHOST_FACTOR = 0.16;  // the rest of the model dims to this fraction of its opacity while a part is grabbed
 const CUT_SMOOTH = 0.15;    // ease on the section plane — MediaPipe's landmark depth is noisy, and an unsmoothed plane strobes
@@ -154,7 +154,7 @@ let binShow = false;   // target visibility; the loop eases the bin's opacity to
   for (const m of [body, rim, base, wire]) { m.raycast = () => {}; bin.add(m); }
   bin.userData.mats = [skin, wireMat];
 }
-bin.position.set(1.7, FLOOR_Y + 0.45, 0.9);   // ponytail: front-right of the stage, within a hand's drag reach — tune with BIN_RADIUS
+bin.position.set(1.0, FLOOR_Y + 0.35, 0.7);   // ponytail: front-right but pulled in from the old 1.7 — reaching 1.7 forced the hand to the frame edge (px~0.1) and MediaPipe dropped tracking mid-drag; 1.0 keeps the fingertip near px~0.25, well inside frame. Tune with BIN_RADIUS.
 function showBin(on) { binShow = on; }
 
 // Move the whole stage (floor grid + projector reticle) to a new base height and lift the model with
