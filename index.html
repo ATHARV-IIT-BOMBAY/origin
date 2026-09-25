@@ -4,138 +4,359 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>HoloControl — manipulate 3D with your hands</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet" />
 <style>
-  :root { color-scheme: dark; }
+  /* ============================================================================================
+     HoloControl HUD. The whole interface is meant to read as a projected overlay, not a webpage:
+     angular chamfers instead of rounded cards, hairline brackets instead of borders, and every
+     panel keyed off one accent colour so a mode change repaints the entire HUD at once.
+     Everything here is presentation — element IDs and the classes main.js toggles ('pill' + mode,
+     'hidden', 'on') are load-bearing, so they keep their names.
+     ============================================================================================ */
+  :root {
+    color-scheme: dark;
+    --cy: #35c8ff;              /* primary cyan — the projector's own colour */
+    --cy-dim: rgba(53,200,255,.30);
+    --cy-far: rgba(53,200,255,.09);
+    --ok: #64ffb4;
+    --warn: #ffc23a;
+    --alert: #ff5a3a;
+    --ink: #dcefff;
+    --ink-2: #8fb0cc;
+    --ink-3: #5a7591;
+    --panel: linear-gradient(165deg, rgba(10,22,38,.90), rgba(6,12,22,.86));
+    /* one chamfer value drives every panel so the whole HUD shares a silhouette */
+    --chamf: 14px;
+    --glow: 0 0 22px rgba(53,200,255,.16), inset 0 0 44px rgba(53,200,255,.05);
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: system-ui, sans-serif; background: #0a0a0f; color: #e8e8f0; overflow: hidden; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; overflow: hidden; background: #04070d; color: var(--ink);
+    font-family: 'Rajdhani', system-ui, sans-serif; font-weight: 600;
+    -webkit-font-smoothing: antialiased;
+  }
   canvas#three { display: block; width: 100vw; height: 100vh; }
-  /* mirrored so the preview reads like a mirror; overlay is inside so landmarks mirror too */
-  #cam { position: fixed; right: 16px; bottom: 16px; width: 240px; height: 180px;
-         border-radius: 12px; overflow: hidden; transform: scaleX(-1);
-         background: #000; border: 1px solid #2a2a3a; box-shadow: 0 6px 30px rgba(0,0,0,.5); }
-  #cam video, #cam canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-  #hud { position: fixed; left: 16px; top: 16px; width: 340px; max-width: calc(100vw - 32px);
-         font-size: 14px; line-height: 1.5; background: linear-gradient(180deg, rgba(14,22,38,.82), rgba(10,14,24,.78));
-         backdrop-filter: blur(10px); padding: 14px 16px 12px; border-radius: 14px;
-         border: 1px solid rgba(42,160,255,.28); box-shadow: 0 10px 40px rgba(0,0,0,.5), inset 0 0 30px rgba(42,160,255,.06); }
-  #hud b { color: #8ab4ff; }
-  .hd { display: flex; align-items: center; justify-content: space-between; letter-spacing: 2px;
-        font-weight: 800; font-size: 15px; color: #bfe9ff; text-shadow: 0 0 16px rgba(42,160,255,.6); }
-  .rec { font-size: 10px; letter-spacing: 2px; font-weight: 700; color: #556; border: 1px solid #2a3348;
-         border-radius: 999px; padding: 2px 8px; }
-  .rec.on { color: #ff5a5a; border-color: rgba(255,90,90,.5); animation: pulse 1.6s ease-in-out infinite; }
-  @keyframes pulse { 50% { opacity: .45; } }
-  /* live mode pill — color says what gesture the app thinks you're doing */
-  #modePill { margin-top: 10px; display: inline-block; font-weight: 800; letter-spacing: 3px; font-size: 13px;
-              padding: 6px 14px; border-radius: 999px; color: #dff6ff; background: rgba(90,110,140,.22);
-              border: 1px solid rgba(140,160,190,.4); box-shadow: 0 0 20px rgba(42,160,255,.0); transition: all .18s; }
-  #modePill.rotate  { color:#9dffc4; border-color:#7CFFB2; box-shadow:0 0 22px rgba(124,255,178,.55); }
-  #modePill.zoom    { color:#bff0ff; border-color:#2aa0ff; box-shadow:0 0 22px rgba(42,160,255,.6); }
-  #modePill.explode { color:#ffd39d; border-color:#ff9a3a; box-shadow:0 0 22px rgba(255,140,40,.55); }
-  #modePill.inspect { color:#cfe0ff; border-color:#6a9cff; box-shadow:0 0 22px rgba(106,156,255,.55); }
-  #modePill.lock    { color:#fff0a8; border-color:#ffd84a; box-shadow:0 0 26px rgba(255,216,74,.7); animation: pulse 1s ease-in-out infinite; }
-  #modePill.grab    { color:#ffc2b0; border-color:#ff5a3a; box-shadow:0 0 26px rgba(255,90,58,.7); }
-  #modePill.park    { color:#ffe08a; border-color:#e0b64a; }
-  #modePill.pause   { color:#ff9a9a; border-color:#ff5a5a; box-shadow:0 0 22px rgba(255,90,90,.5); }
-  #state { color: #7CFFB2; font-weight: 600; margin-top: 8px; min-height: 1.2em; }
-  #stats { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 6px; font-size: 12px; color: #9fb3d0; }
-  #stats b { color: #cfe0ff; font-variant-numeric: tabular-nums; }
-  #pose { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px;
-          color: #9fead0; margin-top: 6px; min-height: 1em; opacity: .85; }
-  .legend { margin-top: 10px; font-size: 12.5px; color: #c7d3e6; border-top: 1px solid rgba(120,150,200,.14); padding-top: 8px; }
-  .legend b { color: #8ab4ff; }
-  .row { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  button, label.btn { background: #2a5bd7; color: #fff; border: 0; padding: 7px 12px;
-         border-radius: 8px; font-size: 13px; cursor: pointer; }
-  button:hover, label.btn:hover { background: #3a6be7; }
-  .btn2 { background: rgba(42,160,255,.14) !important; color: #bfe9ff !important; border: 1px solid rgba(42,160,255,.4) !important; }
-  .btn2:hover { background: rgba(42,160,255,.26) !important; }
-  .toggles { gap: 4px 10px; font-size: 12px; }
-  .chk { display: inline-flex; align-items: center; gap: 5px; color: #b8c6dc; cursor: pointer; user-select: none; }
-  .chk input { accent-color: #2aa0ff; }
-  #tune { margin-top: 8px; padding: 10px; border-radius: 10px; background: rgba(8,14,26,.6);
-          border: 1px solid rgba(42,160,255,.2); display: grid; gap: 8px; }
-  #tune label { display: grid; grid-template-columns: 78px 1fr 42px; align-items: center; gap: 8px; font-size: 12px; color: #b8c6dc; }
-  #tune input[type=range] { width: 100%; accent-color: #2aa0ff; }
-  #tune span { text-align: right; font-variant-numeric: tabular-nums; color: #cfe0ff; }
-  .hidden { display: none !important; }
-  .hint { margin-top: 8px; font-size: 11.5px; opacity: .6; }
-  #err { color: #ff8080; margin-top: 8px; }
+
+  /* ---- shared HUD surface ---------------------------------------------------------------- */
+  /* The chamfer is a clip-path, which also clips the border away, so the "frame" is painted by a
+     ::before inset ring instead. Same trick gives us the bracket corners for free. */
+  .surf {
+    position: relative; background: var(--panel); backdrop-filter: blur(14px) saturate(1.2);
+    clip-path: polygon(var(--chamf) 0, 100% 0, 100% calc(100% - var(--chamf)), calc(100% - var(--chamf)) 100%, 0 100%, 0 var(--chamf));
+    box-shadow: var(--glow);
+  }
+  .surf::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    border: 1px solid var(--cy-dim);
+    clip-path: polygon(var(--chamf) 0, 100% 0, 100% calc(100% - var(--chamf)), calc(100% - var(--chamf)) 100%, 0 100%, 0 var(--chamf));
+  }
+  /* a hairline sweeping down the panel — the thing that makes it feel "live" rather than printed */
+  .surf::after {
+    content: ""; position: absolute; left: 0; right: 0; height: 1px; top: 0; pointer-events: none;
+    background: linear-gradient(90deg, transparent, rgba(53,200,255,.55), transparent);
+    animation: sweep 6s cubic-bezier(.6,0,.4,1) infinite; opacity: .75;
+  }
+  @keyframes sweep { 0% { top: 0; opacity: 0; } 8% { opacity: .8; } 55% { top: 100%; opacity: 0; } 100% { top: 100%; opacity: 0; } }
+
+  /* ---- top-left: identity + status ------------------------------------------------------- */
+  #hud {
+    position: fixed; left: 18px; top: 18px; width: 316px; z-index: 10;
+    max-height: calc(100vh - 36px); overflow-y: auto; overscroll-behavior: contain;
+    padding: 14px 15px 13px; font-size: 14px; line-height: 1.45;
+  }
+  #hud::-webkit-scrollbar { width: 5px; }
+  #hud::-webkit-scrollbar-thumb { background: var(--cy-dim); border-radius: 3px; }
+  #hud b { color: var(--cy); font-weight: 700; }
+
+  .hd { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .hd .wm {
+    font-family: 'Orbitron', system-ui, sans-serif; font-weight: 900; font-size: 17px; letter-spacing: 3.5px;
+    background: linear-gradient(180deg, #eaf9ff, #6fd4ff 62%, #2596d8);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 0 14px rgba(53,200,255,.55));
+  }
+  .sub { font-size: 10.5px; letter-spacing: 3px; color: var(--ink-3); text-transform: uppercase; margin-top: 1px; }
+
+  /* REC chip: main.js adds .on when the camera goes live */
+  .rec {
+    font-family: 'Orbitron', monospace; font-size: 9px; letter-spacing: 1.6px; font-weight: 700;
+    color: var(--ink-3); border: 1px solid rgba(90,117,145,.45); padding: 3px 7px 2px; white-space: nowrap;
+    clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
+  }
+  .rec.on { color: #fff; background: rgba(255,60,60,.16); border-color: rgba(255,90,90,.75);
+            box-shadow: 0 0 16px rgba(255,70,70,.5); animation: blink 1.5s ease-in-out infinite; }
+  @keyframes blink { 50% { opacity: .42; } }
+
+  .rule { height: 1px; margin: 11px 0 10px;
+          background: linear-gradient(90deg, var(--cy-dim), rgba(53,200,255,.05) 70%, transparent); }
+
+  /* ---- mode bar: the single biggest status signal, so it gets full width and its own colour -- */
+  #modePill {
+    display: block; position: relative; padding: 8px 12px 7px 15px; margin-bottom: 7px;
+    font-family: 'Orbitron', system-ui, sans-serif; font-weight: 700; font-size: 14px; letter-spacing: 4px;
+    color: var(--ink); background: rgba(53,200,255,.07); border-left: 3px solid var(--ink-3);
+    clip-path: polygon(0 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%, 0 100%);
+    transition: color .16s, border-color .16s, box-shadow .16s, background .16s;
+  }
+  /* every mode recolours the bar AND the stripe, so peripheral vision catches the change */
+  #modePill.rotate  { color:#9dffc4; border-color:var(--ok);    background:rgba(100,255,180,.09); box-shadow:inset 0 0 26px rgba(100,255,180,.13); }
+  #modePill.zoom    { color:#bfeaff; border-color:var(--cy);    background:rgba(53,200,255,.11);  box-shadow:inset 0 0 26px rgba(53,200,255,.15); }
+  #modePill.explode { color:#ffd6a8; border-color:#ff9a3a;      background:rgba(255,154,58,.10);  box-shadow:inset 0 0 26px rgba(255,154,58,.14); }
+  #modePill.inspect { color:#cfe0ff; border-color:#6a9cff;      background:rgba(106,156,255,.10); box-shadow:inset 0 0 26px rgba(106,156,255,.13); }
+  #modePill.lock    { color:#fff0a8; border-color:var(--warn);  background:rgba(255,194,58,.13);  box-shadow:inset 0 0 30px rgba(255,194,58,.20); animation: blink 1s ease-in-out infinite; }
+  #modePill.grab    { color:#ffc7b6; border-color:var(--alert); background:rgba(255,90,58,.14);   box-shadow:inset 0 0 30px rgba(255,90,58,.20); }
+  #modePill.park    { color:#ffe3a0; border-color:#e0b64a; }
+  #modePill.pause   { color:#ffa8a8; border-color:var(--alert); background:rgba(255,90,90,.10); }
+
+  #state { color: var(--ok); font-size: 13.5px; min-height: 1.3em; letter-spacing: .2px;
+           text-shadow: 0 0 14px rgba(100,255,180,.35); }
+
+  /* ---- telemetry: label over a big tabular number, tick-separated like an instrument cluster - */
+  #stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; margin-top: 11px;
+           background: var(--cy-far); border-top: 1px solid var(--cy-dim); border-bottom: 1px solid var(--cy-dim); }
+  #stats span { display: flex; flex-direction: column; align-items: center; gap: 1px;
+                padding: 6px 2px 5px; background: rgba(6,13,24,.55); }
+  #stats i { font-style: normal; font-size: 8.5px; letter-spacing: 1.1px; color: var(--ink-3); text-transform: uppercase; }
+  #stats b { font-family: 'Orbitron', monospace; font-weight: 700; font-size: 13px; color: var(--ink);
+             font-variant-numeric: tabular-nums; text-shadow: 0 0 12px rgba(53,200,255,.5); }
+  /* the removed counter is the one number that means something was destroyed — flag it amber */
+  #stats span:last-child b { color: var(--warn); text-shadow: 0 0 12px rgba(255,194,58,.5); }
+
+  #pose { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10.5px; font-weight: 500;
+          color: rgba(100,255,180,.62); margin-top: 7px; min-height: 1em; letter-spacing: .3px; }
+
+  /* ---- controls --------------------------------------------------------------------------- */
+  /* Grid, not flex-wrap: with wrap, "Snapshot" and "Grid" fell onto lines of their own and the
+     panel read as broken. Fixed columns keep every row full and the left edge aligned. */
+  .row { margin-top: 9px; display: grid; gap: 6px; align-items: center; }
+  .row.g2 { grid-template-columns: 1fr 1fr; }
+  .row.g3 { grid-template-columns: repeat(3, 1fr); }
+  button, label.btn {
+    font-family: 'Rajdhani', system-ui, sans-serif; font-weight: 700; font-size: 12px; letter-spacing: 1.2px;
+    text-transform: uppercase; cursor: pointer; padding: 8px 10px 7px; border: 1px solid transparent;
+    text-align: center; white-space: nowrap;
+    color: #04101c; background: linear-gradient(180deg, #56d6ff, #1f9fd8);
+    clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+    transition: filter .15s, box-shadow .15s, transform .08s;
+  }
+  button:hover, label.btn:hover { filter: brightness(1.16); box-shadow: 0 0 20px rgba(53,200,255,.6); }
+  button:active, label.btn:active { transform: translateY(1px); }
+  .btn2 { color: var(--cy) !important; background: rgba(53,200,255,.09) !important;
+          border-color: var(--cy-dim) !important; }
+  .btn2:hover { background: rgba(53,200,255,.2) !important; color: #dff6ff !important; }
+
+  .toggles { grid-template-columns: 1fr 1fr; gap: 6px 10px; }
+  .chk { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; letter-spacing: .6px;
+         color: var(--ink-2); cursor: pointer; user-select: none; text-transform: uppercase; }
+  .chk:hover { color: var(--ink); }
+  .chk input { accent-color: var(--cy); width: 13px; height: 13px; }
+
+  #tune { margin-top: 9px; padding: 11px 11px 12px; display: grid; gap: 9px;
+          background: rgba(3,9,18,.72); border: 1px solid var(--cy-far);
+          clip-path: polygon(9px 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%, 0 100%, 0 9px); }
+  .tt { font-size: 9px; letter-spacing: 2.4px; color: var(--ink-3); text-transform: uppercase; }
+  #tune > label { display: grid; grid-template-columns: 74px 1fr 40px; align-items: center; gap: 9px;
+                  font-size: 11px; letter-spacing: .8px; color: var(--ink-2); text-transform: uppercase; }
+  #tune input[type=range] { width: 100%; accent-color: var(--cy); height: 3px; }
+  #tune > label > span { text-align: right; font-family: ui-monospace, monospace; font-size: 11px;
+                         font-variant-numeric: tabular-nums; color: var(--cy); }
+  .axis { display: flex; gap: 10px; align-items: center; font-size: 11px; letter-spacing: .8px;
+          color: var(--ink-3); text-transform: uppercase; }
+
+  .hint { margin-top: 9px; font-size: 10.5px; font-weight: 500; letter-spacing: .3px; color: var(--ink-3); line-height: 1.5; }
+  #err { color: #ff8d8d; font-size: 12px; margin-top: 7px; }
   input[type=file] { display: none; }
-  /* floating part label that tracks the pointed-at component in screen space */
-  #label { position: fixed; left: 0; top: 0; pointer-events: none; opacity: 0;
-           transition: opacity .12s; padding: 4px 10px; border-radius: 8px; white-space: nowrap;
-           font-size: 14px; font-weight: 600; color: #dff6ff; background: rgba(10,30,60,.72);
-           border: 1px solid #2aa0ff; box-shadow: 0 0 18px rgba(42,160,255,.6); }
-  /* full-screen holo FX: faint drifting scanlines + a dark vignette, above the canvas but click-through */
+  .hidden { display: none !important; }
+
+  /* ---- bottom-centre legend: lifted out of the panel so the HUD stops being a wall of text --- */
+  /* The only thing it can actually collide with is the camera feed — the HUD ends ~400px higher up.
+     Since the bar is centre-anchored, the widest it can get without reaching the feed is twice the
+     centre-to-feed distance, i.e. 100vw - 2*(254px). That keeps it one clean row down to ~1290px
+     and lets it wrap tidily below that instead of overflowing. */
+  /* Centred with `left:0; right:0; margin:auto` rather than `left:50% + translateX(-50%)` — with
+     left:50% the containing block only runs from the centre to the right edge, so the bar could
+     never be wider than half the viewport and wrapped early no matter what max-width said. */
+  #legend {
+    position: fixed; left: 0; right: 0; bottom: 20px; margin: 0 auto; width: fit-content; z-index: 10;
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 1px;
+    max-width: calc(100vw - 508px); padding: 0;
+  }
+  /* The hairline between chips is a 1px ring on each chip, not a gap showing a container fill:
+     with a fill, a wrapped row left its unused tail glowing. Neighbouring rings land in the same
+     1px gap and overlap exactly, so a full row still reads as one continuous bar. */
+  #legend .lg { display: flex; align-items: center; gap: 6px; padding: 7px 11px 6px;
+                background: rgba(6,13,24,.84); backdrop-filter: blur(12px);
+                box-shadow: 0 0 0 1px var(--cy-far);
+                font-size: 11.5px; letter-spacing: .3px; color: var(--ink-2); white-space: nowrap; }
+  #legend .lg i { font-style: normal; font-size: 14px; filter: saturate(.55) brightness(1.25); line-height: 1; }
+  #legend .lg b { color: var(--ink); font-weight: 700; }
+  /* the removal gesture is the headline feature — give it the accent so the eye lands there */
+  #legend .lg.key { background: rgba(38,27,6,.88); color: #ffe6ad;
+                    box-shadow: 0 0 0 1px rgba(255,194,58,.22), inset 0 0 22px rgba(255,194,58,.10); }
+  #legend .lg.key b { color: var(--warn); }
+
+  /* ---- camera PIP: bracketed like a targeting feed ---------------------------------------- */
+  #cam { position: fixed; right: 18px; bottom: 18px; width: 236px; height: 177px; z-index: 10;
+         overflow: hidden; background: #000; transform: scaleX(-1);   /* mirrored: reads like a mirror */
+         clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
+         box-shadow: 0 0 0 1px var(--cy-dim), 0 8px 40px rgba(0,0,0,.6), 0 0 28px rgba(53,200,255,.13); }
+  #cam video, #cam canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  /* brackets + tag sit OUTSIDE #cam so they don't inherit the mirror flip */
+  #camwrap { position: fixed; right: 18px; bottom: 18px; width: 236px; height: 177px; z-index: 11; pointer-events: none; }
+  #camwrap .br { position: absolute; width: 17px; height: 17px; border: 2px solid var(--cy); opacity: .8; }
+  #camwrap .br.tl { top: 0; left: 0; border-right: 0; border-bottom: 0; }
+  #camwrap .br.tr { top: 0; right: 0; border-left: 0; border-bottom: 0; }
+  #camwrap .br.bl { bottom: 0; left: 0; border-right: 0; border-top: 0; }
+  #camwrap .br.br2 { bottom: 0; right: 0; border-left: 0; border-top: 0; }
+  #camwrap .tag { position: absolute; left: 0; top: -19px; font-family: 'Orbitron', monospace;
+                  font-size: 8.5px; letter-spacing: 2px; color: var(--cy); opacity: .8; }
+
+  /* ---- floating part label, tracks the pointed-at component in screen space ----------------- */
+  #label { position: fixed; left: 0; top: 0; z-index: 10; pointer-events: none; opacity: 0;
+           transition: opacity .12s; padding: 5px 11px 4px; white-space: nowrap;
+           font-size: 13px; font-weight: 700; letter-spacing: 1.3px; text-transform: uppercase;
+           color: #eaf9ff; background: rgba(6,24,44,.85); backdrop-filter: blur(6px);
+           clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+           box-shadow: 0 0 0 1px var(--cy), 0 0 24px rgba(53,200,255,.55); }
+
+  /* ---- full-screen FX: corner brackets, scanlines, vignette. All click-through. -------------- */
+  #frame { position: fixed; inset: 11px; z-index: 6; pointer-events: none; }
+  #frame .c { position: absolute; width: 30px; height: 30px; border: 1px solid rgba(53,200,255,.38); }
+  #frame .c.tl { top:0; left:0; border-right:0; border-bottom:0; }
+  #frame .c.tr { top:0; right:0; border-left:0; border-bottom:0; }
+  #frame .c.bl { bottom:0; left:0; border-right:0; border-top:0; }
+  #frame .c.br { bottom:0; right:0; border-left:0; border-top:0; }
   #fx { position: fixed; inset: 0; pointer-events: none; z-index: 5;
-        background: repeating-linear-gradient(to bottom, transparent 0 2px, rgba(120,200,255,.05) 3px, transparent 4px);
+        background: repeating-linear-gradient(to bottom, transparent 0 2px, rgba(120,200,255,.045) 3px, transparent 4px);
         animation: scan 7s linear infinite; }
-  #fx::after { content: ""; position: absolute; inset: 0; box-shadow: inset 0 0 260px rgba(0,0,0,.7);
-               border: 1px solid rgba(42,160,255,.1); }
+  #fx::after { content: ""; position: absolute; inset: 0;
+               box-shadow: inset 0 0 300px rgba(0,0,0,.78), inset 0 0 90px rgba(10,40,70,.3); }
   @keyframes scan { to { background-position: 0 96px; } }
-  #cam, #hud, #label { z-index: 10; }
-  /* boot intro card: covers the scene on load, fades out once the camera is live */
+
+  /* ---- boot card: staggered lines so load reads as a system coming up ---------------------- */
   #boot { position: fixed; inset: 0; z-index: 20; pointer-events: none; display: grid;
-          place-content: center; text-align: center; gap: 10px; transition: opacity .8s ease;
-          background: radial-gradient(ellipse at center, rgba(4,10,20,.5), rgba(4,8,16,.85)); }
+          place-content: center; text-align: center; gap: 12px; transition: opacity .8s ease;
+          background: radial-gradient(ellipse at center, rgba(4,12,24,.35), rgba(3,6,12,.9)); }
   #boot.hidden { opacity: 0; }
-  #boot .bt { font-size: 44px; font-weight: 800; letter-spacing: 6px; color: #bfe9ff;
-              text-shadow: 0 0 24px rgba(42,160,255,.9), 0 0 60px rgba(42,160,255,.5); }
-  #boot .bs { font-size: 13px; letter-spacing: 3px; color: #7CFFB2; opacity: .85; }
+  #boot .bt { font-family: 'Orbitron', system-ui, sans-serif; font-weight: 900; font-size: clamp(30px, 6.5vw, 62px);
+              letter-spacing: clamp(6px, 1.6vw, 15px); margin-right: -14px;
+              background: linear-gradient(180deg, #ffffff, #7fdcff 55%, #1b8ec9);
+              -webkit-background-clip: text; background-clip: text; color: transparent;
+              filter: drop-shadow(0 0 34px rgba(53,200,255,.8)); animation: rise .9s ease both; }
+  #boot .bl { width: min(460px, 70vw); height: 1px; margin: 0 auto;
+              background: linear-gradient(90deg, transparent, var(--cy), transparent);
+              animation: rise .9s .12s ease both, blink 2.4s 1s ease-in-out infinite; }
+  #boot .bs { font-family: 'Orbitron', monospace; font-size: clamp(9px, 1.2vw, 12px); letter-spacing: 4px;
+              color: var(--ok); opacity: .9; animation: rise .9s .24s ease both; }
+  @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+
+  /* Narrow screens: the centre-anchored width budget collapses, so give the bar the full width and
+     lift it clear of the camera feed rather than letting it shrink to a column. */
+  @media (max-width: 1100px) {
+    #legend { max-width: calc(100vw - 36px); bottom: 14px; }
+    #legend .lg { font-size: 11px; padding: 6px 9px 5px; }
+  }
+  @media (max-width: 820px) {
+    #hud { width: 272px; font-size: 13px; }
+    #legend { bottom: 206px; }
+  }
 </style>
 </head>
 <body>
   <canvas id="three"></canvas>
   <div id="fx"></div>
-  <div id="boot"><div class="bt">HOLOCONTROL</div><div id="bootsub" class="bs">HANDS-FREE 3D · GESTURE INTERFACE</div></div>
+  <div id="frame"><i class="c tl"></i><i class="c tr"></i><i class="c bl"></i><i class="c br"></i></div>
+
+  <div id="boot">
+    <div class="bt">HOLOCONTROL</div>
+    <div class="bl"></div>
+    <div id="bootsub" class="bs">HANDS-FREE 3D · GESTURE INTERFACE</div>
+  </div>
+
   <div id="label"></div>
+
   <div id="cam"><video id="video" playsinline muted></video><canvas id="overlay"></canvas></div>
-  <div id="hud">
-    <div class="hd"><span>HOLOCONTROL</span><span id="rec" class="rec">STANDBY</span></div>
+  <div id="camwrap">
+    <span class="tag">◈ OPTICAL TRACKING</span>
+    <i class="br tl"></i><i class="br tr"></i><i class="br bl"></i><i class="br br2"></i>
+  </div>
+
+  <div id="hud" class="surf">
+    <div class="hd">
+      <div>
+        <div class="wm">HOLOCONTROL</div>
+        <div class="sub">Gesture Interface v1</div>
+      </div>
+      <span id="rec" class="rec">STANDBY</span>
+    </div>
+
+    <div class="rule"></div>
+
     <div id="modePill" class="pill">IDLE</div>
     <div id="state">Camera off</div>
-    <div id="stats"><span>Hands <b id="stHands">0</b></span><span>Parts <b id="stParts">0</b></span><span>Scale <b id="stScale">100%</b></span><span>Explode <b id="stExpl">0%</b></span><span>Removed <b id="stGone">0</b></span></div>
+
+    <div id="stats">
+      <span><i>Hands</i><b id="stHands">0</b></span>
+      <span><i>Parts</i><b id="stParts">0</b></span>
+      <span><i>Scale</i><b id="stScale">100%</b></span>
+      <span><i>Expl</i><b id="stExpl">0%</b></span>
+      <span><i>Removed</i><b id="stGone">0</b></span>
+    </div>
     <div id="pose"></div>
-    <div class="legend">
-      <b>Pinch</b> one hand → rotate · <b>point</b> → inspect a part<br/>
-      <b>Point &amp; hold</b> on a part → lock it, then <b>pinch &amp; pull</b> it out and let go → remove<br/>
-      Two hands <b>apart / together</b> → explode · two-hand <b>pinch</b> → zoom · <b>twist</b> both → roll<br/>
-      Make a <b>fist ✊</b> to park a hand · two fists → pause
-    </div>
-    <div class="row">
-      <button id="start">Start camera</button>
-      <label class="btn" for="file">Load model</label>
+
+    <div class="row g2">
+      <button id="start">▶ Start camera</button>
+      <label class="btn" for="file">⬆ Load model</label>
       <input id="file" type="file" accept=".glb,.gltf,.obj,.fbx,.stl,.blend,model/gltf-binary,model/gltf+json" />
-      <button id="reset" class="btn2">Reset</button>
-      <button id="restore" class="btn2">Restore parts</button>
-      <button id="snap" class="btn2">Snapshot</button>
     </div>
+    <div class="row g3">
+      <button id="reset" class="btn2">↺ Reset</button>
+      <button id="restore" class="btn2">⟳ Restore</button>
+      <button id="snap" class="btn2">⬤ Snapshot</button>
+    </div>
+
+    <div class="rule"></div>
+
     <div class="row toggles">
       <label class="chk"><input type="checkbox" id="tHolo" checked/> Holo skin</label>
       <label class="chk"><input type="checkbox" id="tSpin" checked/> Auto-spin</label>
       <label class="chk"><input type="checkbox" id="tBloom" checked/> Bloom</label>
       <label class="chk"><input type="checkbox" id="tGrid" checked/> Grid</label>
-      <button id="tuneBtn" class="btn2">⚙ Tune</button>
     </div>
+    <div class="row"><button id="tuneBtn" class="btn2">⚙ Calibrate</button></div>
+
     <div id="tune" class="hidden">
+      <div class="tt">Stage calibration</div>
       <label>Rotate <input type="range" id="sRot" min="1" max="14" step="0.5" value="6" /><span id="vRot">6.0</span></label>
       <label>Zoom <input type="range" id="sZoom" min="1" max="14" step="0.5" value="6" /><span id="vZoom">6.0</span></label>
       <label>Smoothing <input type="range" id="sSmooth" min="0.05" max="0.6" step="0.01" value="0.2" /><span id="vSmooth">0.20</span></label>
       <label>Ground <input type="range" id="sGround" min="-3" max="1" step="0.05" value="-1.6" /><span id="vGround">-1.60</span></label>
       <label>Move X <input type="range" id="sOffX" min="-5" max="5" step="0.1" value="0" /><span id="vOffX">0.0</span></label>
-      <label class="chk" style="grid-template-columns:none">Lock rotation axis
-        <span style="display:inline-flex;gap:12px;margin-left:8px">
-          <label class="chk"><input type="checkbox" id="lockX"/> X</label>
-          <label class="chk"><input type="checkbox" id="lockY"/> Y</label>
-          <label class="chk"><input type="checkbox" id="lockZ"/> Z</label>
-        </span>
-      </label>
-      <label class="chk" style="grid-template-columns:none"><input type="checkbox" id="tMirror" checked/> Mirror X (flip if rotation feels backwards)</label>
+      <div class="axis">Lock axis
+        <label class="chk"><input type="checkbox" id="lockX"/> X</label>
+        <label class="chk"><input type="checkbox" id="lockY"/> Y</label>
+        <label class="chk"><input type="checkbox" id="lockZ"/> Z</label>
+      </div>
+      <label class="chk" style="display:flex"><input type="checkbox" id="tMirror" checked/> Mirror X — flip if rotation feels backwards</label>
     </div>
-    <div class="hint">Upload .glb / .gltf / .obj / .fbx / .stl. Blender? File ▸ Export ▸ glTF 2.0 (.glb).</div>
+
+    <div class="hint">Upload .glb / .gltf / .obj / .fbx / .stl — Blender? File ▸ Export ▸ glTF 2.0 (.glb).</div>
     <div id="err"></div>
   </div>
+
+  <div id="legend">
+    <div class="lg"><i>🤏</i><span><b>Pinch</b> rotate</span></div>
+    <div class="lg"><i>☝️</i><span><b>Point</b> inspect</span></div>
+    <div class="lg key"><i>◎</i><span><b>Hold + pull</b> remove</span></div>
+    <div class="lg"><i>🙌</i><span><b>Spread</b> explode</span></div>
+    <div class="lg"><i>🤞</i><span><b>Both pinch</b> zoom</span></div>
+    <div class="lg"><i>🔄</i><span><b>Twist</b> roll</span></div>
+    <div class="lg"><i>✊</i><span><b>Fist</b> park</span></div>
+  </div>
+
   <script type="importmap">
   { "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
