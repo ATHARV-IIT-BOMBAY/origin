@@ -1,6 +1,6 @@
 // gestures.test.js — the one runnable check for the gesture math.  Run: node gestures.test.js
 import assert from 'node:assert';
-import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread, twoHandAngle, landmarkToWorld, handPose, fitTransform } from './gestures.js';
+import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread, twoHandAngle, rollDelta, landmarkToWorld, handPose, fitTransform } from './gestures.js';
 
 // Build a synthetic 21-landmark hand: wrist at (0.5,0.9), middle knuckle at (0.5,0.6)
 // => palmSize = 0.3. Thumb/index tips are passed in so we can force open vs pinched.
@@ -36,6 +36,14 @@ assert.ok(far > near, `spread must grow as hands separate (${near} -> ${far})`);
 assert.ok(Math.abs(twoHandAngle(open, shiftX(open, 0.3))) < 1e-9, 'level hands => angle ~0');
 const lifted = open.map(p => ({ x: p.x + 0.3, y: p.y - 0.3, z: p.z })); // second hand up and to the right
 assert.ok(twoHandAngle(open, lifted) < 0, 'lifting the far hand tips the roll angle negative');
+
+// rollDelta: zooming (both pinch) => no roll no matter the twist; jitter below the deadzone => no
+// roll; a deliberate twist beyond it => roll, sign-flipped by mirror. First frame (null) => 0.
+assert.equal(rollDelta(null, 0.5, {}), 0, 'no previous angle => no roll');
+assert.equal(rollDelta(0.0, 0.5, { zooming: true }), 0, 'zooming suppresses roll entirely');
+assert.equal(rollDelta(0.0, 0.005, { deadzone: 0.012 }), 0, 'sub-deadzone wobble => no roll');
+assert.ok(rollDelta(0.0, 0.2, { deadzone: 0.012, mirror: -1 }) < 0, 'a real twist rolls, mirrored to negative');
+assert.ok(Math.abs(rollDelta(0.0, 0.2, { mirror: 1 }) - 0.2) < 1e-9, 'unmirrored roll equals the raw angle change');
 
 // landmarkToWorld: image center maps to scene origin (at the fixed hand plane), and X is
 // mirrored so a landmark on the image's right lands on the scene's left.

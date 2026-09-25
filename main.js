@@ -14,7 +14,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { HandLandmarker, FilesetResolver, DrawingUtils }
   from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18';
-import { handCenter, pinchStrength, twoHandSpread, twoHandAngle, landmarkToWorld, handPose, fitTransform, INDEX_TIP } from './gestures.js';
+import { handCenter, pinchStrength, twoHandSpread, twoHandAngle, rollDelta, landmarkToWorld, handPose, fitTransform, INDEX_TIP } from './gestures.js';
 
 // ---- Tuning knobs. A webcam is a messy sensor; these are the calibration dials. ----
 // The first four are `let` because the on-screen calibration panel adjusts them live.
@@ -31,6 +31,7 @@ const IDLE_SPIN = 0.0015; // lazy auto-rotate (rad/frame) when you're not contro
 const SPIN_FRICTION = 0.96, SPIN_CAPTURE = 0.5, SPIN_MIN = 0.001;
 const EXPLODE_K = 1.6;                        // full-explosion expansion: parts push out from center
 const EXPLODE_MIN = 0.20, EXPLODE_MAX = 0.75; // two-hand spread range mapped onto 0..1 explosion
+const TWIST_DEADZONE = 0.012;                 // rad/frame of two-hand twist to ignore as jitter, so a zoom/hold doesn't drift into roll
 const BASE_EMISSIVE = 0.6, HIGHLIGHT_EMISSIVE = 2.4; // part glow: resting vs. aimed-at
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm';
@@ -431,17 +432,21 @@ function applyGestures(hands) {
   if (active.length >= 2) {                                                  // two live hands
     const spread = twoHandSpread(active[0].h, active[1].h);
     const ang = twoHandAngle(active[0].h, active[1].h);                      // twist both hands (like a wheel) => roll
-    if (prevAngle != null) { let d = ang - prevAngle; d = Math.atan2(Math.sin(d), Math.cos(d)); target.rz += d * MIRROR_X; }
-    prevAngle = ang;                                                         // unwrapped so it never jumps at ±π
+    const zooming = active[0].pose === 'pinch' && active[1].pose === 'pinch';
+    // Roll ONLY when not zooming: a two-hand pinch is a pure scale, so the model won't drift in
+    // orientation while you resize it (and axis locks then actually hold during a zoom). The
+    // deadzone drops sub-threshold angle wobble so only a deliberate twist rolls.
+    target.rz += rollDelta(prevAngle, ang, { zooming, deadzone: TWIST_DEADZONE, mirror: MIRROR_X }); // 0 while zooming/first frame
+    prevAngle = ang;                                                         // tracked even while zooming, so no jump on release
     prevCenter = null; idle = false; clearHighlight();
-    if (active[0].pose === 'pinch' && active[1].pose === 'pinch') {          // two pinches => zoom (+ roll)
+    if (zooming) {                                                           // two pinches => pure zoom
       if (prevSpread != null) target.scale = clamp(target.scale + (spread - prevSpread) * ZOOM_SPEED, SCALE_MIN, SCALE_MAX);
       prevSpread = spread;
-      stateEl.textContent = 'Zoom + roll'; setMode('zoom');
-    } else {                                                                 // else => explode by gap (+ roll)
+      stateEl.textContent = 'Zoom'; setMode('zoom');
+    } else {                                                                 // else => explode by gap (+ twist-roll)
       target.explode = clamp((spread - EXPLODE_MIN) / (EXPLODE_MAX - EXPLODE_MIN), 0, 1);
       prevSpread = null;
-      stateEl.textContent = target.explode > 0.05 ? `Exploded ${Math.round(target.explode * 100)}%` : 'Spread hands to explode · twist to roll';
+      stateEl.textContent = target.explode > 0.05 ? `Exploded ${Math.round(target.explode * 100)}%` : 'Spread to explode · twist to roll';
       setMode('explode');
     }
   } else if (active.length === 1 && active[0].pose === 'pinch') {            // one pinch => rotate

@@ -51,6 +51,17 @@ export function twoHandAngle(handA, handB) {
   return Math.atan2(b.y - a.y, b.x - a.x);
 }
 
+// Per-frame roll (radians) from a two-hand twist. `zooming` (both hands pinched) returns 0 so a
+// resize stays a pure scale and axis locks actually hold during a zoom. Otherwise roll by the
+// unwrapped angle change, dropping sub-`deadzone` wobble so only a deliberate twist rolls. `mirror`
+// is ±1 to match the mirrored preview. prevAngle == null (first frame) also returns 0.
+export function rollDelta(prevAngle, ang, { zooming = false, deadzone = 0.012, mirror = -1 } = {}) {
+  if (prevAngle == null || zooming) return 0;
+  let d = ang - prevAngle;
+  d = Math.atan2(Math.sin(d), Math.cos(d));   // unwrap across the ±π seam
+  return Math.abs(d) > deadzone ? d * mirror : 0;
+}
+
 // Map a normalized image landmark ({x,y in [0,1]}, z ~ relative depth) into three.js
 // world space, so we can draw the hand floating inside the scene. Mirrored on X to match
 // the mirrored webcam preview: move your real hand right, the on-screen hand goes right.
