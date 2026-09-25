@@ -76,7 +76,7 @@ const SFX = {                       // sound played when we ENTER each mode (fir
   pause:   () => blip(150, 0.16, 'sine'),
 };
 let lastMode = '';
-function setMode(m) { updateModePill(m); if (m === lastMode) return; lastMode = m; (SFX[m] || null)?.(); }
+function setMode(m) { if (m === lastMode) return; lastMode = m; updateModePill(m); SFX[m]?.(); }
 
 // ---------- three.js scene ----------
 // preserveDrawingBuffer lets the Snapshot button read the canvas back as a PNG.
@@ -300,6 +300,7 @@ function updateHandViz(hands) {
 hideHands();
 
 function resize() {
+  if (!innerWidth || !innerHeight) return;   // a collapsed/0-sized pane would give aspect = NaN and a zero-size framebuffer
   renderer.setSize(innerWidth, innerHeight, false);
   composer.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
@@ -318,11 +319,29 @@ const LOADERS = {
   stl:  { L: STLLoader,  pick: g => new THREE.Mesh(g, new THREE.MeshStandardMaterial({
            color: 0x143a5a, emissive: 0x0aa0ff, emissiveIntensity: BASE_EMISSIVE, metalness: 0.3, roughness: 0.35 })) },
 };
+// Hand the old model's GPU memory back before dropping it. Nothing here is small — the models
+// people actually load run 8-120 MB — so swapping three or four without this quietly fills VRAM
+// and the frame rate falls off. Materials are collected rather than traversed because holo-skin
+// parks the original alongside its replacement in userData; textures hang off the materials.
+function disposeTree(root) {
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    o.geometry.dispose();
+    for (const m of [o.material, o.userData.origMat, o.userData.holoMat].flat()) {
+      if (!m) continue;
+      for (const v of Object.values(m)) if (v?.isTexture) v.dispose();
+      m.dispose();
+    }
+  });
+}
 function swapModel(obj) {
-  pivot.remove(model);
+  clearHighlight();                 // before the dispose: the highlight holds a material from the OLD model
+  pivot.remove(model); disposeTree(model);
   model = obj; fitToView(model); pivot.add(model);
-  collectParts(model); applyHoloSkin(model, holoSkin); clearHighlight();
-  target.explode = current.explode = 0; target.rx = target.ry = target.rz = 0; spinVel.rx = spinVel.ry = 0;
+  collectParts(model); applyHoloSkin(model, holoSkin);
+  // Reset scale too, not just rotation: fitToView just sized this model to the stage, and leaving a
+  // previous 3.5x zoom on the pivot multiplies straight back through it and throws it off-screen.
+  target.explode = current.explode = 0; target.rx = target.ry = target.rz = 0; target.scale = 1; spinVel.rx = spinVel.ry = 0;
   updateStats(0);   // refresh the parts count for the newly loaded model (live tracking re-fills hands next frame)
 }
 $('file').addEventListener('change', (e) => {
@@ -340,7 +359,8 @@ $('file').addEventListener('change', (e) => {
   new entry.L().load(url, (res) => {
     swapModel(entry.pick(res)); URL.revokeObjectURL(url);
     stateEl.textContent = `Loaded ${f.name}`; blip(720, 0.14, 'triangle');
-  }, undefined, (err) => { URL.revokeObjectURL(url); errEl.textContent = 'Could not load model: ' + err; });
+    e.target.value = '';   // clear it, or re-picking the SAME file fires no change event and looks broken
+  }, undefined, (err) => { URL.revokeObjectURL(url); e.target.value = ''; errEl.textContent = 'Could not load model: ' + err; });
 });
 
 // ---------- HUD controls: holo skin · showcase toggles · snapshot · live calibration ----------
@@ -423,7 +443,10 @@ async function initHands() {
   drawUtils = new DrawingUtils(overlay.getContext('2d'));
 }
 
+let starting = false;
 async function startCamera() {
+  if (running || starting) return;   // a second click would open a second camera stream and a second tracker
+  starting = true;
   try {
     errEl.textContent = ''; initAudio();
     if (!handLandmarker) { stateEl.textContent = 'Loading model…'; await initHands(); }
@@ -434,7 +457,10 @@ async function startCamera() {
     if (recEl) { recEl.textContent = 'LIVE'; recEl.classList.add('on'); }
     const boot = $('boot');
     if (boot) { $('bootsub').textContent = 'HAND TRACKING ONLINE'; blip(600, 0.12, 'triangle'); setTimeout(() => boot.classList.add('hidden'), 900); }
-  } catch (err) { errEl.textContent = 'Camera/model error: ' + err; }
+  } catch (err) {
+    errEl.textContent = 'Camera/model error: ' + err;
+    $('boot')?.classList.add('hidden');   // otherwise the intro card covers the scene forever and the app looks dead
+  } finally { starting = false; }
 }
 $('start').addEventListener('click', startCamera);
 
@@ -531,5 +557,5 @@ function loop() {
   for (const r of reticle.children) r.rotateOnWorldAxis(_up, 0.004 * r.userData.dir); // flat spin, projector look
   composer.render();
 }
-updateStats(0);   // seed the HUD readout (rocket = 6 parts) before the first frame
+updateStats(0);   // seed the HUD readout (rocket = 7 parts) before the first frame
 loop();

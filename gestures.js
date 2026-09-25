@@ -53,13 +53,17 @@ export function twoHandAngle(handA, handB) {
 
 // Per-frame roll (radians) from a two-hand twist. `zooming` (both hands pinched) returns 0 so a
 // resize stays a pure scale and axis locks actually hold during a zoom. Otherwise roll by the
-// unwrapped angle change, dropping sub-`deadzone` wobble so only a deliberate twist rolls. `mirror`
-// is ±1 to match the mirrored preview. prevAngle == null (first frame) also returns 0.
-export function rollDelta(prevAngle, ang, { zooming = false, deadzone = 0.012, mirror = -1 } = {}) {
+// unwrapped angle change, band-passed: below `deadzone` is sensor wobble, above `maxStep` is not a
+// hand. The upper guard matters because the tracker hands us two hands in no guaranteed order — if
+// it swaps them between frames the joining line flips ~180° and the model would snap-roll. No wrist
+// twists 20°/frame (~600°/s at 30fps), so rejecting those costs nothing real. `mirror` is ±1 to
+// match the mirrored preview. prevAngle == null (first frame) also returns 0.
+export function rollDelta(prevAngle, ang, { zooming = false, deadzone = 0.012, maxStep = 0.35, mirror = -1 } = {}) {
   if (prevAngle == null || zooming) return 0;
   let d = ang - prevAngle;
   d = Math.atan2(Math.sin(d), Math.cos(d));   // unwrap across the ±π seam
-  return Math.abs(d) > deadzone ? d * mirror : 0;
+  const a = Math.abs(d);
+  return (a > deadzone && a <= maxStep) ? d * mirror : 0;
 }
 
 // Map a normalized image landmark ({x,y in [0,1]}, z ~ relative depth) into three.js

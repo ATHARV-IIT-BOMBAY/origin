@@ -44,6 +44,11 @@ assert.equal(rollDelta(0.0, 0.5, { zooming: true }), 0, 'zooming suppresses roll
 assert.equal(rollDelta(0.0, 0.005, { deadzone: 0.012 }), 0, 'sub-deadzone wobble => no roll');
 assert.ok(rollDelta(0.0, 0.2, { deadzone: 0.012, mirror: -1 }) < 0, 'a real twist rolls, mirrored to negative');
 assert.ok(Math.abs(rollDelta(0.0, 0.2, { mirror: 1 }) - 0.2) < 1e-9, 'unmirrored roll equals the raw angle change');
+// ...and the upper guard: if the tracker swaps which hand is first, the joining line flips ~180°.
+// That must NOT roll the model, while a fast-but-human twist still must.
+assert.equal(rollDelta(0.2, 0.2 - Math.PI, {}), 0, 'a ~180° flip (hands swapped in the tracker list) is rejected');
+assert.equal(rollDelta(2.9, -2.9, {}), 0, 'the same flip across the ±π seam is rejected too');
+assert.ok(Math.abs(rollDelta(0.0, 0.3, { mirror: 1 }) - 0.3) < 1e-9, 'a fast but human twist still rolls');
 
 // landmarkToWorld: image center maps to scene origin (at the fixed hand plane), and X is
 // mirrored so a landmark on the image's right lands on the scene's left.
