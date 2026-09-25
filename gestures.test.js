@@ -1,6 +1,6 @@
 // gestures.test.js — the one runnable check for the gesture math.  Run: node gestures.test.js
 import assert from 'node:assert';
-import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread, twoHandAngle, rollDelta, landmarkToWorld, handPose, fitTransform, aimStep, AIM_OFF } from './gestures.js';
+import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread, twoHandAngle, rollDelta, landmarkToWorld, handPose, fitTransform, aimStep, AIM_OFF, palmPlane } from './gestures.js';
 
 // Build a synthetic 21-landmark hand: wrist at (0.5,0.9), middle knuckle at (0.5,0.6)
 // => palmSize = 0.3. Thumb/index tips are passed in so we can force open vs pinched.
@@ -129,6 +129,26 @@ assert.equal(handPose(pinched), 'pinch', 'thumb+index together => pinch');
   assert.equal(step(step(AIM_OFF, { pose: 'point', id: 3, now: 0 }), { pose: 'open', id: null, now: 300 }).phase, 'off', 'dropping the point abandons the dwell');
   assert.equal(step(s, { pose: 'point', id: 3, now: 1600 + 2600 }).phase, 'off', 'a lock you never commit to expires');
   assert.equal(step(s, { pose: 'point', id: 3, now: 1600 + 2400 }).phase, 'lock', '...but not before it has to');
+}
+
+// palmPlane: the cut plane the section gesture hands to the renderer. A hand held flat against the
+// image plane faces the camera, so its normal must be +Z; rolling the pinky side away from the
+// camera must tip that normal sideways, and the normal must always be unit length or the clipping
+// plane's distance test is meaningless.
+{
+  const flatPalm = makeHand({ thumb: { x: 0.3, y: 0.6, z: 0 }, index: { x: 0.45, y: 0.2, z: 0 } });
+  const p = palmPlane(flatPalm, 4, 1.5);
+  assert.ok(Math.hypot(p.normal.x, p.normal.y, p.normal.z) - 1 < 1e-9, 'normal is unit length');
+  assert.ok(p.normal.z > 0.999, 'a hand flat to the camera gives a +Z normal (palm faces you)');
+
+  const rolled = flatPalm.map((q, i) => i === 17 ? { ...q, z: 0.5 } : q); // pinky knuckle pushed away
+  const r = palmPlane(rolled, 4, 1.5);
+  assert.ok(r.normal.x < -0.5, 'rolling the pinky side away tips the normal off-axis');
+  assert.ok(Math.abs(Math.hypot(r.normal.x, r.normal.y, r.normal.z) - 1) < 1e-9, 'still unit length when tilted');
+
+  // three collinear palm points have no plane; returning NaN would clip the whole model away
+  const flat = Array.from({ length: 21 }, () => ({ x: 0.5, y: 0.5, z: 0 }));
+  assert.equal(palmPlane(flat).normal.z, 1, 'a degenerate palm falls back to +Z instead of NaN');
 }
 
 console.log('gestures.test.js: all assertions passed ✓');

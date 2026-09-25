@@ -106,6 +106,24 @@ export function landmarkToWorld(pt, span = 4, depth = 1.5) {
   };
 }
 
+// The palm as a plane. The wrist and the index/pinky knuckles are three non-collinear points on the
+// back of the hand, so their cross product is the palm normal — which is all a cut plane needs. Both
+// point and normal come back already in world space (via landmarkToWorld) so the caller can hand
+// them straight to a three.js clipping plane; the normal is unit length. Because clipping keeps the
+// positive side, turning your palm over flips which half of the model survives, which is the whole
+// interaction. A degenerate hand (three collinear points) returns +Z rather than NaN.
+export function palmPlane(hand, span = 4, depth = 1.5) {
+  const a = landmarkToWorld(hand[WRIST], span, depth);
+  const b = landmarkToWorld(hand[5], span, depth);   // index knuckle
+  const c = landmarkToWorld(hand[17], span, depth);  // pinky knuckle
+  const u = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
+  const v = { x: c.x - a.x, y: c.y - a.y, z: c.z - a.z };
+  let n = { x: u.y * v.z - u.z * v.y, y: u.z * v.x - u.x * v.z, z: u.x * v.y - u.y * v.x };
+  const len = Math.hypot(n.x, n.y, n.z);
+  n = len < 1e-9 ? { x: 0, y: 0, z: 1 } : { x: n.x / len, y: n.y / len, z: n.z / len };
+  return { point: { x: (a.x + b.x + c.x) / 3, y: (a.y + b.y + c.y) / 3, z: (a.z + b.z + c.z) / 3 }, normal: n };
+}
+
 // A finger is "extended" when its tip reaches noticeably farther from the wrist than its
 // middle (PIP) joint — i.e. straightened, not curled back toward the palm. Rotation-robust
 // because it compares distances, not absolute up/down. (tip, pip) are landmark indices.
