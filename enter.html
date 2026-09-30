@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en" class="pre">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Origin · Pre-Flight Check</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="apple-touch-icon" href="favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet" />
+<style>
+:root{
+  --cy:#35c8ff; --cy-dim:rgba(53,200,255,.30); --cy-far:rgba(53,200,255,.09);
+  --ok:#64ffb4; --warn:#ffc23a; --bad:#ff5d6c;
+  --ink:#dcefff; --ink-2:#8fb0cc; --ink-3:#5a7591;
+  --panel:linear-gradient(165deg,rgba(10,22,38,.90),rgba(6,12,22,.86));
+  --chamf:14px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{min-height:100vh;background:#04070d;color:var(--ink);
+  font-family:'Rajdhani',system-ui,sans-serif;font-weight:600;
+  display:flex;flex-direction:column;align-items:center;overflow-x:hidden;transition:opacity .45s ease}
+html.pre body{opacity:0}
+a{color:inherit}
+/* shared FX: blueprint grid, scanlines, corner brackets — continues the landing */
+#grid{position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:linear-gradient(var(--cy-far) 1px,transparent 1px) 0 0/48px 48px,
+             linear-gradient(90deg,var(--cy-far) 1px,transparent 1px) 0 0/48px 48px;
+  mask:radial-gradient(circle at 50% 44%,#000 52%,transparent 100%)}
+#fx{position:fixed;inset:0;z-index:1;pointer-events:none;opacity:.5;mix-blend-mode:overlay;
+  background:repeating-linear-gradient(0deg,rgba(0,0,0,.16) 0 1px,transparent 1px 3px)}
+#frame i{position:fixed;width:26px;height:26px;border:2px solid var(--cy-dim);z-index:3;pointer-events:none}
+#frame .tl{top:18px;left:18px;border-right:0;border-bottom:0}
+#frame .tr{top:18px;right:18px;border-left:0;border-bottom:0}
+#frame .bl{bottom:18px;left:18px;border-right:0;border-top:0}
+#frame .br{bottom:18px;right:18px;border-left:0;border-top:0}
+.topbar{position:relative;z-index:4;width:100%;max-width:1080px;display:flex;justify-content:space-between;
+  align-items:center;padding:26px 30px 0;font-family:'Orbitron',sans-serif;font-size:11px;letter-spacing:2px;color:var(--ink-3)}
+.topbar .live{display:flex;align-items:center;gap:8px;color:var(--ok)}
+.topbar .live b{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok);animation:blink 1.8s ease-in-out infinite}
+@keyframes blink{50%{opacity:.35}}
+/* ---- airlock shell ---- */
+.airlock{position:relative;z-index:4;width:100%;max-width:1080px;flex:1;
+  display:flex;flex-direction:column;justify-content:center;padding:22px 30px 40px}
+.eyebrow{font-family:'Orbitron',sans-serif;font-size:11px;letter-spacing:4px;color:var(--cy);
+  display:flex;align-items:center;gap:14px;margin-bottom:14px;justify-content:center}
+.eyebrow::before,.eyebrow::after{content:'';height:1px;flex:1;max-width:80px;background:var(--cy-dim)}
+h1{font-family:'Orbitron',sans-serif;font-weight:900;letter-spacing:.05em;font-size:clamp(30px,5vw,48px);
+  line-height:1.02;text-align:center;text-shadow:0 0 26px rgba(53,200,255,.35)}
+.lede{max-width:60ch;margin:14px auto 30px;text-align:center;font-size:clamp(15px,2vw,18px);
+  font-weight:500;color:var(--ink-2);line-height:1.5}
+.lede b{color:var(--cy);font-weight:700}
+.deck{display:grid;grid-template-columns:1.15fr 1fr;gap:24px;align-items:stretch}
+/* ---- camera self-view, bracketed like the app's targeting PIP ---- */
+.feed{position:relative;background:#03080f;border:1px solid var(--cy-dim);overflow:hidden;
+  min-height:320px;display:flex;align-items:center;justify-content:center}
+.feed video{width:100%;height:100%;object-fit:cover;transform:scaleX(-1);display:none}
+.feed.on video{display:block}
+.feed .off{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:12px;color:var(--ink-3);font-family:'Orbitron',sans-serif;font-size:12px;letter-spacing:2px;text-align:center}
+.feed.on .off{display:none}
+.feed .off .lens{font-size:42px;opacity:.5}
+.feed .brk{position:absolute;width:22px;height:22px;border:2px solid var(--cy);opacity:.85}
+.feed .brk.tl{top:12px;left:12px;border-right:0;border-bottom:0}
+.feed .brk.tr{top:12px;right:12px;border-left:0;border-bottom:0}
+.feed .brk.bl{bottom:12px;left:12px;border-right:0;border-top:0}
+.feed .brk.br{bottom:12px;right:12px;border-left:0;border-top:0}
+.feed .ftag{position:absolute;top:14px;left:50%;transform:translateX(-50%);font-family:'Orbitron',sans-serif;
+  font-size:10px;letter-spacing:2px;color:var(--ink-3)}
+/* ---- device channels ---- */
+.channels{display:flex;flex-direction:column;gap:18px}
+.chan{position:relative;background:var(--panel);border:1px solid rgba(53,200,255,.14);padding:20px 22px;
+  clip-path:polygon(var(--chamf) 0,100% 0,100% calc(100% - var(--chamf)),calc(100% - var(--chamf)) 100%,0 100%,0 var(--chamf))}
+.chan .head{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+.chan .ico{font-size:22px;filter:drop-shadow(0 0 8px var(--cy-dim))}
+.chan h3{font-family:'Orbitron',sans-serif;font-size:15px;letter-spacing:1.5px;color:var(--ink)}
+.chan .sub{font-family:'Orbitron',sans-serif;font-size:10px;letter-spacing:1.5px;color:var(--ink-3);margin-top:2px}
+.chan .why{font-size:15px;line-height:1.45;color:var(--ink-2);margin:4px 0 16px}
+.chan .why b{color:var(--ink);font-weight:700}
+.lamp{margin-left:auto;display:flex;align-items:center;gap:8px;font-family:'Orbitron',sans-serif;font-size:10px;letter-spacing:1.5px;color:var(--ink-3)}
+.lamp i{width:8px;height:8px;border-radius:50%;background:var(--ink-3);transition:.2s}
+.chan.on .lamp{color:var(--ok)} .chan.on .lamp i{background:var(--ok);box-shadow:0 0 10px var(--ok)}
+.chan.denied .lamp{color:var(--bad)} .chan.denied .lamp i{background:var(--bad);box-shadow:0 0 10px var(--bad)}
+.toggle{width:100%;font-family:'Orbitron',sans-serif;font-weight:700;letter-spacing:2px;font-size:12px;
+  padding:12px;cursor:pointer;color:var(--cy);background:transparent;border:1px solid var(--cy-dim);
+  clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px);transition:.15s}
+.toggle:hover{background:rgba(53,200,255,.10);box-shadow:0 0 20px rgba(53,200,255,.25)}
+.chan.on .toggle{color:#03121c;background:linear-gradient(180deg,#7fe4ff,#22a6e0);border-color:transparent}
+.toggle:focus-visible{outline:2px solid #fff;outline-offset:3px}
+.meter{height:6px;margin-top:14px;background:rgba(53,200,255,.10);border-radius:3px;overflow:hidden;display:none}
+.chan.on .meter{display:block}
+.meter i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--ok),var(--cy));transition:width .06s linear}
+/* ---- privacy + enter ---- */
+.privacy{max-width:74ch;margin:26px auto 0;text-align:center;font-size:14px;line-height:1.5;color:var(--ink-3)}
+.privacy b{color:var(--ok);font-weight:700}
+.go{margin-top:24px;display:flex;flex-direction:column;align-items:center;gap:12px}
+.enter{font-family:'Orbitron',sans-serif;font-weight:700;letter-spacing:3px;font-size:15px;color:#03121c;
+  border:0;cursor:pointer;padding:16px 48px;background:linear-gradient(180deg,#7fe4ff,#22a6e0);
+  clip-path:polygon(12px 0,100% 0,100% calc(100% - 12px),calc(100% - 12px) 100%,0 100%,0 12px);
+  box-shadow:0 0 30px rgba(53,200,255,.4);transition:box-shadow .2s,transform .08s}
+.enter:hover{box-shadow:0 0 48px rgba(53,200,255,.7)}
+.enter:active{transform:translateY(1px)}
+.enter:focus-visible{outline:2px solid #fff;outline-offset:4px}
+.go .hint{font-family:'Orbitron',sans-serif;font-size:10.5px;letter-spacing:1.5px;color:var(--ink-3)}
+@media (max-width:760px){ .deck{grid-template-columns:1fr} .feed{min-height:240px;order:-1} }
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div id="grid"></div>
+<div id="fx"></div>
+<div id="frame"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
+
+<header class="topbar">
+  <span>ORIGIN · PRE-FLIGHT</span>
+  <span class="live"><b></b> AIRLOCK READY</span>
+</header>
+
+<main class="airlock">
+  <div class="eyebrow">SYSTEMS CHECK</div>
+  <h1>Arm your instruments</h1>
+  <p class="lede">Origin reads your <b>hands</b> to move the hologram and your <b>voice</b> for commands.
+    Bring the channels online now — or enter without them and arm them later inside the lab.</p>
+
+  <div class="deck">
+    <section class="feed" id="feed" aria-label="Camera preview">
+      <span class="ftag">OPTICAL FEED</span>
+      <div class="off"><span class="lens">◉</span><span>CAMERA OFFLINE</span></div>
+      <video id="video" playsinline muted></video>
+      <i class="brk tl"></i><i class="brk tr"></i><i class="brk bl"></i><i class="brk br"></i>
+    </section>
+    <div class="channels">
+      <div class="chan" id="chCam">
+        <div class="head"><span class="ico">📷</span>
+          <div><h3>Camera</h3><div class="sub">OPTICAL SENSOR · HAND TRACKING</div></div>
+          <span class="lamp"><i></i><span class="st">OFFLINE</span></span></div>
+        <p class="why">Your camera is the controller. The hand-tracking model runs <b>entirely on your device</b> —
+          it reads 21 points per hand to move, grab and explode the model. Nothing is recorded or uploaded.</p>
+        <button class="toggle" id="camBtn">ENABLE CAMERA</button>
+      </div>
+      <div class="chan" id="chMic">
+        <div class="head"><span class="ico">🎙</span>
+          <div><h3>Microphone</h3><div class="sub">VOICE COMMAND CHANNEL</div></div>
+          <span class="lamp"><i></i><span class="st">OFFLINE</span></span></div>
+        <p class="why">Optional. Speak commands like <b>"x-ray"</b>, <b>"explode"</b> or <b>"reset"</b>.
+          Audio is used only for those commands and is never stored by Origin.</p>
+        <button class="toggle" id="micBtn">ENABLE MICROPHONE</button>
+        <div class="meter" id="meter"><i></i></div>
+      </div>
+    </div>
+  </div>
+
+  <p class="privacy">Origin has <b>no server</b>. Hand tracking runs 100% in your browser and the camera feed
+    never leaves this device. Voice, if enabled, is transcribed by your browser's own speech engine.</p>
+
+  <div class="go">
+    <button class="enter" id="enter">ENTER ORIGIN</button>
+    <p class="hint">Enter with any combination — camera, mic, both, or neither.</p>
+  </div>
+</main>
+<script>
+(function(){
+  var camStream=null, micStream=null, audioCtx=null, meterRAF=0;
+  var feed=document.getElementById('feed'), video=document.getElementById('video');
+  var chCam=document.getElementById('chCam'), chMic=document.getElementById('chMic');
+  var camBtn=document.getElementById('camBtn'), micBtn=document.getElementById('micBtn');
+  var meterBar=document.querySelector('#meter i');
+  requestAnimationFrame(function(){document.documentElement.classList.remove('pre');}); // fade in
+
+  function setLamp(chan,state){                 // 'off' | 'on' | 'denied'
+    chan.classList.toggle('on',state==='on');
+    chan.classList.toggle('denied',state==='denied');
+    chan.querySelector('.st').textContent = state==='on'?'ONLINE':state==='denied'?'BLOCKED':'OFFLINE';
+  }
+
+  async function enableCam(){
+    try{
+      camStream=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});
+      video.srcObject=camStream; await video.play();
+      feed.classList.add('on'); setLamp(chCam,'on'); camBtn.textContent='CAMERA ARMED ✓';
+    }catch(e){ setLamp(chCam,'denied'); camBtn.textContent='RETRY CAMERA'; }
+  }
+  function disableCam(){
+    if(camStream){camStream.getTracks().forEach(function(t){t.stop();});camStream=null;}
+    video.srcObject=null; feed.classList.remove('on'); setLamp(chCam,'off'); camBtn.textContent='ENABLE CAMERA';
+  }
+  camBtn.addEventListener('click',function(){ chCam.classList.contains('on')?disableCam():enableCam(); });
+  function pump(analyser,buf){                  // live level meter — proof the mic hears you
+    analyser.getByteTimeDomainData(buf);
+    var sum=0; for(var i=0;i<buf.length;i++){var v=(buf[i]-128)/128;sum+=v*v;}
+    meterBar.style.width=Math.min(100,Math.sqrt(sum/buf.length)*260).toFixed(0)+'%';
+    meterRAF=requestAnimationFrame(function(){pump(analyser,buf);});
+  }
+  async function enableMic(){
+    try{
+      micStream=await navigator.mediaDevices.getUserMedia({audio:true});
+      setLamp(chMic,'on'); micBtn.textContent='MIC ARMED ✓';
+      audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();
+      var src=audioCtx.createMediaStreamSource(micStream), an=audioCtx.createAnalyser();
+      an.fftSize=512; src.connect(an); pump(an,new Uint8Array(an.fftSize));
+    }catch(e){ setLamp(chMic,'denied'); micBtn.textContent='RETRY MICROPHONE'; }
+  }
+  function disableMic(){
+    cancelAnimationFrame(meterRAF); meterBar.style.width='0';
+    if(micStream){micStream.getTracks().forEach(function(t){t.stop();});micStream=null;}
+    setLamp(chMic,'off'); micBtn.textContent='ENABLE MICROPHONE';
+  }
+  micBtn.addEventListener('click',function(){ chMic.classList.contains('on')?disableMic():enableMic(); });
+
+  document.getElementById('enter').addEventListener('click',function(){
+    // hand the lab our choices; permission is already granted so app.html won't re-prompt. Session-scoped.
+    sessionStorage.setItem('origin.cam', chCam.classList.contains('on')?'1':'0');
+    sessionStorage.setItem('origin.voice', chMic.classList.contains('on')?'1':'0');
+    disableCam(); disableMic();                 // release devices; app.html re-acquires cleanly
+    document.body.style.opacity='0';
+    setTimeout(function(){location.href='app.html';},380);
+  });
+})();
+</script>
+</body>
+</html>
