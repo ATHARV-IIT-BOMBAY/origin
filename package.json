@@ -1,5 +1,5 @@
 {
-  "name": "holocontrol",
+  "name": "origin",
   "version": "0.1.0",
   "type": "module",
   "description": "Rotate and zoom a 3D model with webcam hand gestures — no mouse, no LLM.",

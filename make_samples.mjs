@@ -50,7 +50,7 @@ Buffer.from(idx.buffer).copy(bin, OFF_I);
 
 function gltfJSON(withUri) {
   return {
-    asset: { version: '2.0', generator: 'holocontrol make_samples' },
+    asset: { version: '2.0', generator: 'origin make_samples' },
     scene: 0,
     scenes: [{ nodes: PARTS.map((_, i) => i) }],
     nodes: PARTS.map(p => ({ name: p.name, mesh: 0, translation: p.t, scale: p.s })),
@@ -87,7 +87,7 @@ function toGLB(gltf) {
 
 // multi-object OBJ: bake each part's transform into vertices (OBJ has no node transforms).
 function toOBJ() {
-  let out = '# HoloControl sample — robot (6 named parts)\n', base = 0;
+  let out = '# Origin sample — robot (6 named parts)\n', base = 0;
   for (const p of PARTS) {
     out += `o ${p.name}\n`;
     for (let i = 0; i < box.P.length; i += 3)
