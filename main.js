@@ -14,7 +14,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { HandLandmarker, FilesetResolver, DrawingUtils }
   from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18';
-import { handCenter, pinchStrength, twoHandSpread, twoHandAngle, rollDelta, landmarkToWorld, handPose, fitTransform, aimStep, AIM_OFF, palmPlane, pinchPoint, INDEX_TIP, axisFromVoice } from './gestures.js';
+import { handCenter, pinchStrength, twoHandSpread, twoHandAngle, rollDelta, landmarkToWorld, handPose, fitTransform, aimStep, AIM_OFF, palmPlane, pinchPoint, INDEX_TIP, axisFromVoice } from './gestures.js?v=24';
 
 // ---- Tuning knobs. A webcam is a messy sensor; these are the calibration dials. ----
 // The first four are `let` because the on-screen calibration panel adjusts them live.
