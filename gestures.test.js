@@ -1,6 +1,6 @@
 // gestures.test.js — the one runnable check for the gesture math.  Run: node gestures.test.js
 import assert from 'node:assert';
-import { palmSize, handCenter, pinchStrength, isPinching, twoHandSpread, twoHandAngle, rollDelta, landmarkToWorld, handPose, fitTransform, aimStep, AIM_OFF, palmPlane } from './gestures.js';
+import { palmSize, handCenter, pinchStrength, isPinching, isPinchPose, twoHandSpread, twoHandAngle, rollDelta, landmarkToWorld, handPose, fitTransform, aimStep, AIM_OFF, palmPlane, pinchPoint, axisFromVoice } from './gestures.js';
 
 // Build a synthetic 21-landmark hand: wrist at (0.5,0.9), middle knuckle at (0.5,0.6)
 // => palmSize = 0.3. Thumb/index tips are passed in so we can force open vs pinched.
@@ -25,7 +25,23 @@ assert.ok(pinchStrength(open) < 0.2, `open hand should read un-pinched, got ${pi
 assert.ok(pinchStrength(pinched) > 0.9, `closed hand should read pinched, got ${pinchStrength(pinched)}`);
 assert.ok(!isPinching(open) && isPinching(pinched), 'isPinching must flip between the two');
 
+// isPinchPose is the STRICT gate handPose uses to fire a grab — it must reject the two things the user saw
+// misread as a pinch: a flat open palm, and a fist (thumb tucked near EVERY fingertip). A real pinch closes
+// the thumb on the index SPECIFICALLY, so it's the only one where the index is distinctly the nearest tip.
+assert.ok(isPinchPose(pinched), 'thumb+index touching, middle away => a real pinch');
+assert.ok(!isPinchPose(open), 'an open palm (tips wide apart) is not a pinch');
+// a fist: thumb tucked in the palm, as near the middle tip (0.5,0.6) as the index — close enough to fool the
+// absolute-distance test, but the relative guard (index must be the closest) rejects it. This is the misread.
+const fistGrip = makeHand({ thumb: { x: 0.50, y: 0.58, z: 0 }, index: { x: 0.52, y: 0.60, z: 0 } });
+assert.ok(!isPinchPose(fistGrip), 'a fist (thumb near every fingertip, not the index specifically) is not a pinch');
+
 assert.ok(Math.abs(handCenter(open).x - 0.5) < 0.05, 'palm center x should sit near 0.5');
+
+// pinchPoint sits at the thumb/index midpoint — up near the fingertips, NOT back at the palm centroid
+// (0.66 here). That offset is the whole point: you pinch AT a part with your fingers, not your wrist.
+const pp = pinchPoint(pinched);
+assert.ok(Math.abs(pp.x - 0.5) < 1e-9 && Math.abs(pp.y - 0.45) < 1e-9, 'pinchPoint is the thumb/index midpoint');
+assert.ok(pp.y < handCenter(pinched).y - 0.1, 'pinch point sits well toward the fingertips, not the palm centroid');
 
 const near = twoHandSpread(open, shiftX(open, 0.2));
 const far  = twoHandSpread(open, shiftX(open, 0.5));
@@ -82,6 +98,10 @@ assert.equal(handPose(pointing), 'point', 'index-only extended => point');
 assert.equal(handPose(flat), 'open', 'all fingers extended => open');
 assert.equal(handPose(fist), 'fist', 'all fingers curled => fist (parks/ignores the hand)');
 assert.equal(handPose(pinched), 'pinch', 'thumb+index together => pinch');
+// thumbs-up = fingers curled (like a fist) but the thumb raised clear of the palm => the reset gesture.
+const thumbsup = poseHand({ index: false, middle: false, ring: false, pinky: false });
+thumbsup[4] = { x: 0.50, y: 0.15, z: 0 }; // thumb tip straight up, far from the palm centroid
+assert.equal(handPose(thumbsup), 'thumbsup', 'fingers curled + thumb raised => thumbs-up (reset)');
 
 // fitTransform: a model whose geometry sits FAR from its own origin (min 10..14) must still land
 // centered on the stage with its feet on the floor — the bug was that scaling after centering
@@ -96,44 +116,59 @@ assert.equal(handPose(pinched), 'pinch', 'thumb+index together => pinch');
   assert.ok(Math.abs(world(min, 'y') - (-1.6)) < 1e-9, 'feet rest exactly on the floor');
 }
 
-// aimStep: the pinch-free part machine, driven by a fake clock. A long dwell (info-then-grab) is the
-// whole safety so nothing grabs by accident. Once grabbed the part follows the finger regardless of what
-// pose the tracker reports frame to frame (the flicker bug); it ends only two ways: dragged into the bin
-// (removed), or the controlling hand goes away (dropped home). No pinch, no fling, no pull distance.
+// aimStep: PROXIMITY + POSE model. The caller passes `id` = the part nearest the hand on screen when it's
+// within reach (null = nothing close). POINTING one finger at a part INSPECTS it (the caller times the dwell);
+// a PINCH while a part is in reach GRABs it DIRECTLY (no point/fist first — that was the grab-never-fires bug);
+// OPEN releases (over the bin => removed, else snaps home). A FIST does NOT grab here (it rotates the whole
+// model, in main.js) and must not inspect; an OPEN hand near a part is neutral and does not inspect either.
+// The grab must survive the tracker flickering the pose mid-carry; a pinch carried through the bin must NOT delete.
 {
-  const O = { dwellMs: 600 };
-  const step = (st, i) => aimStep(st, i, O);
+  const step = (st, i) => aimStep(st, i);
 
-  // only a steady point at a real part may start the machine — a pinch is the rotate gesture, hands off
-  assert.equal(step(AIM_OFF, { pose: 'pinch', id: 3, now: 0 }).phase, 'off', 'a pinch never arms removal (it rotates)');
-  assert.equal(step(AIM_OFF, { pose: 'open',  id: 3, now: 0 }).phase, 'off', 'an open hand arms nothing');
-  assert.equal(step(AIM_OFF, { pose: 'point', id: null, now: 0 }).phase, 'off', 'pointing at empty space arms nothing');
+  // nothing in reach arms nothing — a fist, an open hand, whatever, with no part nearby
+  assert.equal(step(AIM_OFF, { pose: 'pinch', id: null }).phase, 'off', 'a pinch with no part in reach grabs nothing');
+  assert.equal(step(AIM_OFF, { pose: 'open', id: null }).phase, 'off', 'an open hand over empty space arms nothing');
 
-  // point at part 3 and hold: the dwell fills (this is the "info" window), then the part grabs — no pinch
-  let s = step(AIM_OFF, { pose: 'point', id: 3, now: 1000 });
-  assert.equal(s.phase, 'aim', 'pointing at a part starts the dwell (info showing)');
-  s = step(s, { pose: 'point', id: 3, now: 1300 });
-  assert.ok(s.phase === 'aim' && Math.abs(s.progress - 0.5) < 1e-9, 'half-way through the dwell, still only inspecting');
-  s = step(s, { pose: 'point', id: 3, now: 1600 });
-  assert.ok(s.phase === 'grab' && s.action === 'grab' && s.id === 3, 'a full dwell grabs the part onto the finger, firing once');
+  // an OPEN hand near a part is neutral now — it does NOT inspect (only a deliberate point does)
+  assert.equal(step(AIM_OFF, { pose: 'open', id: 3 }).phase, 'off', 'an open hand near a part is neutral, not an inspect');
 
-  // dragging: the grab MUST survive the tracker flickering off 'point' as the hand moves — the old bug.
-  const held = step(s, { pose: 'point', id: 3, now: 1700 });
-  assert.ok(held.phase === 'grab' && held.action === null, 'holding keeps dragging it — no repeat action');
-  assert.equal(step(held, { pose: 'open',  id: null, now: 1800, present: true }).phase, 'grab', "pose flickering to 'open' mid-drag does NOT drop the grab");
-  assert.equal(step(held, { pose: null,    id: null, now: 1800, present: true }).phase, 'grab', 'a dropped pose reading (hand still there) does NOT drop the grab');
+  // POINTING one finger at a part within reach => inspecting it (info card, after the caller's dwell)
+  let s = step(AIM_OFF, { pose: 'point', id: 3 });
+  assert.ok(s.phase === 'aim' && s.id === 3 && s.action === null, 'pointing at a part within reach inspects it');
 
-  // removal is ONLY the dustbin: drag the part in => removed, firing once
-  const binned = step(held, { pose: 'point', id: 3, now: 1900, present: true, inBin: true });
-  assert.ok(binned.action === 'remove' && binned.id === 3 && binned.phase === 'off', 'dragging the part into the bin removes it');
+  // a FIST near a part must NOT grab and must NOT inspect — a fist is whole-model rotate, not a grab
+  assert.equal(step(AIM_OFF, { pose: 'fist', id: 3 }).phase, 'off', 'a fist near a part neither grabs nor inspects (it rotates the model)');
 
-  // letting go WITHOUT the bin snaps it home: the controlling hand leaving (gone / fist / two hands) => drop
-  assert.equal(step(held, { pose: null, id: null, now: 2000, present: false }).action, 'drop', 'losing the controlling hand drops it back home, not removed');
-  assert.ok(step(held, { pose: null, id: null, now: 2000, present: false }).phase === 'off', 'and the machine resets');
+  // PINCH while a part is in reach => grab it directly, no point/fist first (the whole fix)
+  s = step(AIM_OFF, { pose: 'pinch', id: 3 });
+  assert.ok(s.phase === 'grab' && s.action === 'grab' && s.id === 3, 'a pinch near a part grabs it at once, firing once');
 
-  // escape hatches during the dwell: aim elsewhere restarts it, dropping the point abandons it
-  assert.ok(step(step(AIM_OFF, { pose: 'point', id: 3, now: 0 }), { pose: 'point', id: 7, now: 100 }).id === 7, 'aiming at a different part restarts the dwell there');
-  assert.equal(step(step(AIM_OFF, { pose: 'point', id: 3, now: 0 }), { pose: 'open', id: null, now: 100 }).phase, 'off', 'dropping the point abandons the dwell');
+  // dragging: the grab MUST survive the tracker flickering the pose/target as the hand moves — the old bug.
+  const held = step(s, { pose: 'pinch', id: 3 });
+  assert.ok(held.phase === 'grab' && held.action === null, 'holding the pinch keeps carrying — no repeat action');
+  assert.equal(step(held, { pose: 'point', id: 9, present: true }).phase, 'grab', 'pose/target flickering mid-carry does NOT drop it');
+  assert.equal(step(held, { pose: null,    id: null, present: true }).phase, 'grab', 'a dropped pose reading (hand still there) does NOT drop it');
+  assert.equal(step(held, { pose: 'fist', id: null, present: true }).phase, 'grab', "a flicker to 'fist' (rotate) mid-carry does NOT drop it either");
+  assert.equal(step(held, { pose: null, id: null, present: true }).id, 3, 'the carried part stays locked even as the nearest id changes');
+
+  // removal is ONLY the deliberate open-over-bin: opening the hand over the bin removes it, firing once
+  const binned = step(held, { pose: 'open', id: null, present: true, inBin: true });
+  assert.ok(binned.action === 'remove' && binned.id === 3 && binned.phase === 'off', 'opening the hand over the bin removes it');
+
+  // ...but carrying a fist THROUGH the bin without opening must NOT delete it (kills the proximity/timer bug)
+  assert.equal(step(held, { pose: 'pinch', id: 3, present: true, inBin: true }).phase, 'grab', 'a pinch carried over the bin keeps holding — no auto-delete');
+
+  // opening away from the bin snaps it home; losing the hand also drops home (a lost hand never removes)
+  assert.equal(step(held, { pose: 'open', id: null, present: true, inBin: false }).action, 'drop', 'opening away from the bin drops it home');
+  assert.equal(step(held, { pose: null,   id: null, present: false }).action, 'drop', 'losing the controlling hand drops it home, not removed');
+  assert.ok(step(held, { pose: null, id: null, present: false }).phase === 'off', 'and the machine resets');
+
+  // while inspecting: pointing nearer another part switches the target; pointing away from all parts abandons it
+  assert.equal(step(step(AIM_OFF, { pose: 'point', id: 3 }), { pose: 'point', id: 7 }).id, 7, 'the nearer part switches inspection');
+  assert.equal(step(step(AIM_OFF, { pose: 'point', id: 3 }), { pose: 'point', id: null }).phase, 'off', 'pointing away from all parts abandons inspection');
+
+  // a thumbs-up near a part must NOT inspect or grab — it's the reset, resolved elsewhere
+  assert.equal(step(AIM_OFF, { pose: 'thumbsup', id: 3 }).phase, 'off', 'thumbs-up near a part is not an inspect/grab (reset is separate)');
 }
 
 // palmPlane: the cut plane the section gesture hands to the renderer. A hand held flat against the
@@ -154,6 +189,19 @@ assert.equal(handPose(pinched), 'pinch', 'thumb+index together => pinch');
   // three collinear palm points have no plane; returning NaN would clip the whole model away
   const flat = Array.from({ length: 21 }, () => ({ x: 0.5, y: 0.5, z: 0 }));
   assert.equal(palmPlane(flat).normal.z, 1, 'a degenerate palm falls back to +Z instead of NaN');
+}
+
+// axisFromVoice — voice command parsing (drives the mic-only axis lock)
+{
+  assert.equal(axisFromVoice('lock x'), 'x', 'lock x freezes the X axis');
+  assert.equal(axisFromVoice('lock the y axis'), 'y', 'natural phrasing still resolves the axis');
+  assert.equal(axisFromVoice('lock z please'), 'z');
+  assert.equal(axisFromVoice('why'), null, 'a bare axis word without "lock" does nothing');
+  assert.equal(axisFromVoice('unlock'), 'unlock', 'unlock frees all axes');
+  assert.equal(axisFromVoice('unlock the x axis'), 'unlock', 'unlock wins even though it contains "lock" and "x"');
+  assert.equal(axisFromVoice('explode'), null, 'an unrelated command is not a lock');
+  assert.equal(axisFromVoice('lock'), null, '"lock" with no axis is ambiguous → no-op, not a wrong axis');
+  assert.equal(axisFromVoice('lock ex'), 'x', 'recognizer homophone "ex" maps to X');
 }
 
 console.log('gestures.test.js: all assertions passed ✓');

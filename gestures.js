@@ -1,4 +1,4 @@
-// gestures.js — pure hand-landmark math for HoloControl.
+// gestures.js — pure hand-landmark math for Origin.
 // No DOM, no three.js: just geometry on MediaPipe hand landmarks, so it's unit-testable.
 // A "hand" is an array of 21 landmarks, each { x, y, z } in normalized [0,1] image coords.
 
@@ -6,6 +6,7 @@
 export const WRIST = 0;
 export const THUMB_TIP = 4;
 export const INDEX_TIP = 8;
+export const MIDDLE_TIP = 12;
 export const MIDDLE_MCP = 9; // stable palm anchor (middle-finger knuckle)
 
 const PALM_POINTS = [0, 5, 9, 13, 17]; // wrist + the four finger bases = the palm
@@ -27,6 +28,14 @@ export function handCenter(hand) {
   return { x: x / PALM_POINTS.length, y: y / PALM_POINTS.length };
 }
 
+// The pinch point: the midpoint of the thumb tip and the index tip. This is where the hand actually
+// closes on something — the spot you line up with a part on screen — so it's the right anchor for
+// "grab what I'm pinching". Far better than the palm centroid, which sits back toward the wrist,
+// offset from where the fingers converge, so pinching AT a part measured from the wrong place.
+export function pinchPoint(hand) {
+  return { x: (hand[THUMB_TIP].x + hand[INDEX_TIP].x) / 2, y: (hand[THUMB_TIP].y + hand[INDEX_TIP].y) / 2 };
+}
+
 // 0 = fingers open, 1 = thumb and index touching. Scale-invariant (divided by palm size).
 export function pinchStrength(hand) {
   const d = dist2d(hand[THUMB_TIP], hand[INDEX_TIP]) / palmSize(hand);
@@ -36,6 +45,18 @@ export function pinchStrength(hand) {
 
 export function isPinching(hand, threshold = 0.6) {
   return pinchStrength(hand) >= threshold;
+}
+
+// A DELIBERATE pinch, for pose classification — stricter than pinchStrength alone, which fired far too
+// readily (a relaxed open palm or a fist both put the thumb within ~0.5 palms of the index and read as a
+// pinch — the over-sensitive grab). A real pinch closes the thumb ON THE INDEX SPECIFICALLY: (1) the tips
+// genuinely touch (< ~0.4 palms apart), AND (2) the thumb is clearly nearer the index than the middle tip.
+// (2) is what rejects the impostors — a fist tucks the thumb near ALL the fingertips (thumb–index ≈ thumb–
+// middle), and an open palm holds it near none; only in a true pinch is the index distinctly the closest.
+export function isPinchPose(hand) {
+  const ti = dist2d(hand[THUMB_TIP], hand[INDEX_TIP]);
+  const tm = dist2d(hand[THUMB_TIP], hand[MIDDLE_TIP]);
+  return ti / palmSize(hand) < 0.4 && ti < tm * 0.7;   // ponytail: 0.4 / 0.7 tuned to reject palm & fist; loosen if real pinches miss, tighten if palms still grab
 }
 
 // Distance between two hands' centers — drives zoom (spread apart = zoom in).
@@ -66,32 +87,32 @@ export function rollDelta(prevAngle, ang, { zooming = false, deadzone = 0.012, m
   return (a > deadzone && a <= maxStep) ? d * mirror : 0;
 }
 
-// Part removal as a pure state machine, so the timing is testable against a fake clock, not a webcam.
-// Point at a part and HOLD it: for the first few seconds you're just INSPECTING it (info shows, part
-// glows blue). Hold past the dwell and it GRABS — the part turns red and sticks to your fingertip.
-// Then move your hand and the part follows, whatever the tracker thinks your pose is: this is the whole
-// fix for "it won't move" — MediaPipe's finger classification flickers off 'point' the instant the hand
-// moves, so requiring 'point' every frame dropped the grab the moment you tried to drag. We keep the
-// grab while a single controlling hand is present (`present`) and only end it two ways: drag the part
-// into the dustbin (`inBin`) -> removed; or let go — hand gone, fist, or a second hand — -> snaps home.
-//   phase:  'off' -> 'aim' (inspecting, dwell filling) -> 'grab' (stuck to the finger)
+// Part extraction as a pure state machine, so the timing is testable against fake inputs, not a webcam.
+// PROXIMITY + POSE model (the user's design): the caller finds the part nearest the hand's aim point ON
+// SCREEN and passes its `id` when it's within reach (null when nothing is close). POINT one finger at a
+// piece and it's INSPECTED — the caller times a short dwell before it commits the info card, so a glance
+// doesn't fire (blue glow, no commitment). PINCH (thumb+index) while a part is in reach and you GRAB it
+// directly — no point or fist first. The part turns red and sticks to your hand 1:1. OPEN your hand to let
+// go: over the dustbin it's REMOVED, anywhere else it snaps HOME. Nothing is time-based, so nothing deletes
+// on a timer and carrying a part through the bin does nothing — removal is only the deliberate open-over-bin.
+// A FIST is free for whole-model rotate (see main.js); an OPEN hand is neutral/ignored — moving it does nothing.
+//   phase:  'off' -> 'aim' (pointing at a part, inspecting) -> 'grab' (pinched, part follows the hand)
 //   action: one-shot edge for sound/HUD — null | 'grab' | 'remove' | 'drop'
-// `pose` is null when the hand leaves frame; only a steady 'point' at a real `id` fills the dwell.
-// `present` = a single controlling hand is still here (defaults to "a hand is in frame"); `inBin` = the
-// grabbed part has been dragged into the dustbin. inBin removes; losing `present` drops it home.
-export const AIM_OFF = { phase: 'off', id: null, t0: 0, progress: 0, action: null };
-export function aimStep(st, { pose, id, now, present = pose != null, inBin = false }, { dwellMs = 5000 } = {}) {
-  if (st.phase === 'grab') {                                  // stuck to the finger; pose may flicker as the hand moves
-    if (inBin) return { ...AIM_OFF, id: st.id, action: 'remove' };   // dragged into the dustbin
-    if (!present) return { ...AIM_OFF, id: st.id, action: 'drop' };  // hand gone / fist / two hands: snap it home
-    return { ...st, action: null };                          // otherwise keep following the finger, whatever the pose reads
+// Once grabbed, the grab SURVIVES pose flicker as the hand moves (the old "it won't move" bug): only a clear
+// 'open' hand or a lost hand (`present` false) releases it, and the caller further debounces 'open' over a
+// few frames so a mid-drag wobble (the pinch loosening as you move) never drops or bins the part. A stray
+// 'fist'/'point'/dropped reading keeps carrying. `id` = the reachable part (null = none in reach); `present`
+// = a single controlling hand is here; `inBin` = the grabbed part is currently over the dustbin.
+export const AIM_OFF = { phase: 'off', id: null, action: null };
+export function aimStep(st, { pose, id, present = pose != null, inBin = false }) {
+  if (st.phase === 'grab') {                                        // stuck to the hand; the pinch holds it
+    if (pose === 'open' && inBin) return { ...AIM_OFF, id: st.id, action: 'remove' }; // opened over the bin: remove
+    if (pose === 'open' || !present) return { ...AIM_OFF, id: st.id, action: 'drop' };  // opened / hand gone: snap home
+    return { ...st, action: null };                                 // pinch (or a pose flicker) keeps carrying it
   }
-  if (pose !== 'point' || id == null) return AIM_OFF;         // hand gone, or not pointing at a part
-  if (st.phase !== 'aim' || st.id !== id) return { phase: 'aim', id, t0: now, progress: 0, action: null };
-  const progress = Math.min(1, (now - st.t0) / dwellMs);
-  return progress >= 1
-    ? { phase: 'grab', id, t0: now, progress: 1, action: 'grab' }
-    : { ...st, progress, action: null };
+  if (pose === 'pinch' && id != null) return { phase: 'grab', id, action: 'grab' };   // pinch a nearby part: grab it now
+  if (pose === 'point' && id != null) return { phase: 'aim', id, action: null };       // POINT one finger at a part: inspect it (caller times the dwell before revealing the card)
+  return AIM_OFF;                                                   // nothing pointing at / pinching a part: nothing armed
 }
 
 // Map a normalized image landmark ({x,y in [0,1]}, z ~ relative depth) into three.js
@@ -130,21 +151,42 @@ export function fingerExtended(hand, tip, pip) {
   return dist2d(hand[tip], hand[WRIST]) > dist2d(hand[pip], hand[WRIST]) * 1.15;
 }
 
-// Classify the hand into the one pose we act on: 'fist' | 'pinch' | 'point' | 'open'.
-// fist = every finger curled (used to "park"/ignore a hand), pinch = thumb+index together
-// (grab), point = only the index finger out (aim), else open. Fist is tested before pinch:
-// a tight fist tucks the thumb against the index and would otherwise misread as a pinch.
+// Thumb sticking out (👍) vs tucked into a fist (✊): thumb tip far from the palm centroid,
+// palm-normalized so it's scale- and rotation-robust. Only used to split 'thumbsup' from 'fist'
+// (both have all four fingers curled) — a tucked fist-thumb lands ~0.7 palms out, a raised thumb ~1.5+.
+export function thumbOut(hand) {
+  return dist2d(hand[THUMB_TIP], handCenter(hand)) / palmSize(hand) > 0.8; // ponytail: 0.8 splits tucked/raised thumb; user's 👍 misread as fist at 0.9 — tune on real hands
+}
+
+// Classify the hand into the poses we act on: 'fist' | 'thumbsup' | 'pinch' | 'point' | 'open'.
+// fist = every finger curled with the thumb tucked (grab & hold a part); thumbsup = fingers curled
+// but the thumb raised (reset everything); pinch = a DELIBERATE thumb-on-index pinch (grab a part); point =
+// only the index out (inspect a part); else open (neutral / two-palm zoom). The curled-finger cases are
+// tested first, and pinch uses isPinchPose (not raw pinchStrength) so a relaxed palm or a fist — thumb near
+// every fingertip — no longer misreads as a pinch (the over-sensitive grab you hit).
 export function handPose(hand) {
   const idx = fingerExtended(hand, 8, 6);
   const mid = fingerExtended(hand, 12, 10);
   const rng = fingerExtended(hand, 16, 14);
   const pky = fingerExtended(hand, 20, 18);
-  if (!idx && !mid && !rng && !pky) return 'fist';
-  if (pinchStrength(hand) >= 0.6) return 'pinch';
+  if (!idx && !mid && !rng && !pky) return thumbOut(hand) ? 'thumbsup' : 'fist';
+  if (isPinchPose(hand)) return 'pinch';
   return (idx && !mid && !rng && !pky) ? 'point' : 'open';
 }
 
-// Where to drop a freshly-loaded model so it sits centered on the holo-stage. Uploaded models
+// Parse a speech transcript into an axis-lock command: 'x' | 'y' | 'z' to freeze that rotation axis,
+// 'unlock' to free all, null for anything else. Pure so it's unit-tested here, not against a live mic.
+// Word-boundary matched so "lock the x axis" hits 'x' but "explode" or "extra" never do; "unlock" wins
+// first (it contains "lock" too). Homophones the recognizer emits for single letters ('why'→y, 'zee'→z,
+// 'ex'/'axe'→x) are folded in so a spoken letter that gets transcribed as a word still lands.
+const AXIS_WORD = { x: ['x', 'ex', 'axe'], y: ['y', 'why'], z: ['z', 'zee', 'zed'] };
+export function axisFromVoice(t) {
+  if (/\b(unlock|free|release)\b/.test(t)) return 'unlock';
+  if (!t.includes('lock')) return null;
+  for (const a in AXIS_WORD) if (AXIS_WORD[a].some((w) => new RegExp(`\\b${w}\\b`).test(t))) return a;
+  return null;
+}
+
 // carry an arbitrary origin — often far from the geometry — so naively they land "at a random
 // point". Given the model's bounding box (measured at scale 1) we return the {scale, position}
 // that: scales the largest side to `target`, centers it on X/Z, and rests its bottom on `floorY`
