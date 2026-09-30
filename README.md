@@ -42,8 +42,10 @@ Eight moves, learned once. Six with one hand, two with both. There's a full illu
 
 ## Everything it does
 
-- **8 demo models, zero setup** — rocket, turbofan, satellite, molecule, drone, and three 4D polytopes
-  (tesseract, 16-cell, 5-cell). Multi-part ones (turbofan, robot) come apart when you explode them.
+- **9 demo models, zero setup** — two hand-built procedural models (a multi-part rocket and a cutaway
+  turbofan), four detailed showcase models (Iron Man's **Mark VII** armor, an **arc reactor**, the **Taj
+  Mahal**, and an **animated gear train** that plays its rig live), and three **4D polytopes** (tesseract,
+  16-cell, 5-cell). Multi-part ones come apart when you explode them.
 - **Bring your own model** — `.glb` / `.gltf` / `.obj` / `.fbx` / `.stl`, and real **CAD**: `.step` / `.iges`.
   It's read locally in the browser; nothing is uploaded. Off-origin models get auto-centered, scaled, and
   stood on the floor so they never land "somewhere off in space."
@@ -51,7 +53,8 @@ Eight moves, learned once. Six with one hand, two with both. There's a full illu
   see-through).
 - **Inspect · carry · remove** — point to identify a part, pinch to pick it up, drop it in the bin to delete it.
 - **Section & measure** — a live cut plane and bounding dimensions to read the model like a blueprint.
-- **Voice** — say "rocket", "explode", "snapshot"… (Web Speech API, another local sensor — still no LLM).
+- **Voice** — say "iron man", "explode", "snapshot"… and **"lock x" / "lock y" / "lock z"** to freeze one
+  rotation axis, **"unlock"** to free them all (Web Speech API, another local sensor — still no LLM).
 - **Present / Share / Snapshot** — fullscreen the hologram (`F`), copy a link that reproduces the exact demo,
   rotation, zoom, explode state and render mode, or save a PNG.
 - **Mouse & keyboard fallback** — no camera? Drag to rotate, scroll to zoom, `[` / `]` to explode. Nothing is
@@ -115,9 +118,10 @@ python3 -m http.server 8000
 ```
 
 Open <http://localhost:8000>, follow the on-ramp, and allow the camera. With no model loaded you get the
-rocket to play with. Sample models live in [`models/`](models/) — a multi-part **robot** (`.glb`/`.gltf`/`.obj`,
-so explode pulls its limbs apart) and a single-piece **crystal** (`.stl`). Regenerate them with
-`node make_samples.mjs`.
+rocket to play with, and the showcase models in [`models/`](models/) — `iron-man_mark_7.glb`,
+`arc_reactor.glb`, `taj_mahal.glb`, and `gears_animation.glb` — are one click away in the demo bar. Two tiny
+test samples, a multi-part **robot** (`.glb`/`.gltf`/`.obj`) and a single-piece **crystal** (`.stl`), are also
+there; regenerate those with `node make_samples.mjs`.
 
 ## Test the gesture math
 
